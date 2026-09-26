@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vapor-talk",
+  "main": "./app/server.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "vapor-talk-db",
+      // `wrangler d1 create vapor-talk-db` で作成した ID に置き換える
+      "database_id": "00000000-0000-0000-0000-000000000000"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "RoomDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RoomDO"] }],
+  // 有効期限切れルームの掃除
+  "triggers": { "crons": ["*/30 * * * *"] },
+  "vars": {
+    // Cloudflare Realtime SFU の App ID（トークンは secret の CALLS_APP_TOKEN）
+    "CALLS_APP_ID": ""
+  }
+}

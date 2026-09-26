@@ -1,0 +1,7 @@
+# Cloudflare Realtime SFU（ダッシュボードの Realtime > Serverless SFU で作成）
+CALLS_APP_ID=
+CALLS_APP_TOKEN=
+# REST API の Bearer キー
+API_KEY=dev-api-key
+# 参加トークン / セッションチケットの署名鍵（十分に長いランダム文字列）
+TOKEN_SECRET=dev-token-secret-change-me

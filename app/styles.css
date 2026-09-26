@@ -1,0 +1,15 @@
+@import "tailwindcss";
+@source "./";
+
+@keyframes speaking-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgb(52 211 153 / 0.9); }
+  50% { box-shadow: 0 0 0 6px rgb(52 211 153 / 0.35); }
+}
+
+.speaking {
+  animation: speaking-pulse 1s ease-in-out infinite;
+}
+
+input[type="range"].volume {
+  accent-color: #8b5cf6;
+}
