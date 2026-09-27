@@ -1,6 +1,7 @@
-import { Head, useForm } from "@inertiajs/react";
+import { Head, useForm, usePage } from "@inertiajs/react";
 import { MAX_PARTICIPANTS_LIMIT, ROOM_NAME_MAX } from "../domain/room";
-import { Logo } from "../components/Logo";
+import { Header } from "../components/Header";
+import type { SessionUser } from "../user";
 import { MicIcon, ScreenIcon, UsersIcon, LinkIcon } from "../components/icons";
 
 const EXPIRY_OPTIONS = [
@@ -11,6 +12,7 @@ const EXPIRY_OPTIONS = [
 ];
 
 export default function Home({ error }: { error?: string }) {
+  const { user } = usePage<{ user: SessionUser | null }>().props;
   const form = useForm({ name: "", expiresIn: EXPIRY_OPTIONS[2].sec });
 
   const submit = (e: React.FormEvent) => {
@@ -21,12 +23,11 @@ export default function Home({ error }: { error?: string }) {
   return (
     <div className="min-h-screen bg-[radial-gradient(ellipse_at_top,_rgb(124_58_237/0.25),_transparent_60%)]">
       <Head title="vapor-talk" />
-      <header className="mx-auto flex max-w-5xl items-center justify-between px-6 py-5">
-        <Logo />
-        <a href="#api" className="text-sm text-slate-400 hover:text-slate-200">
+      <Header>
+        <a href="#api" className="text-slate-400 hover:text-slate-200">
           API
         </a>
-      </header>
+      </Header>
 
       <main className="mx-auto max-w-5xl px-6 pb-24">
         <section className="grid items-center gap-12 py-12 md:grid-cols-2">
@@ -37,7 +38,7 @@ export default function Home({ error }: { error?: string }) {
               <span className="bg-gradient-to-r from-violet-400 to-sky-400 bg-clip-text text-transparent">軽量ボイスチャット</span>
             </h1>
             <p className="mt-5 text-slate-400">
-              アカウント不要。ルームを作って招待 URL を共有すれば、ブラウザだけで最大 {MAX_PARTICIPANTS_LIMIT} 人と音声通話・画面共有ができます。
+              参加にアカウントは不要。ルームを作って招待 URL を共有すれば、ブラウザだけで最大 {MAX_PARTICIPANTS_LIMIT} 人と音声通話・画面共有ができます。
             </p>
             <ul className="mt-8 grid grid-cols-2 gap-3 text-sm text-slate-300">
               <Feature icon={<MicIcon />} text="高音質な音声通話" />
@@ -47,6 +48,7 @@ export default function Home({ error }: { error?: string }) {
             </ul>
           </div>
 
+          {user ? (
           <form onSubmit={submit} className="rounded-2xl border border-white/10 bg-slate-900/80 p-6 shadow-2xl shadow-violet-950/40">
             <h2 className="text-lg font-semibold">ルームを作成</h2>
             <label className="mt-5 block text-sm text-slate-400" htmlFor="room-name">
@@ -84,6 +86,18 @@ export default function Home({ error }: { error?: string }) {
               {form.processing ? "作成中…" : "ルームを作成"}
             </button>
           </form>
+          ) : (
+            <div className="rounded-2xl border border-white/10 bg-slate-900/80 p-6 text-center shadow-2xl shadow-violet-950/40">
+              <h2 className="text-lg font-semibold">ルームを作成</h2>
+              <p className="mt-3 text-sm text-slate-400">ルームの作成にはログインが必要です。参加する人はアカウント不要です。</p>
+              <a
+                href="/auth/google"
+                className="mt-6 block w-full rounded-lg bg-violet-600 py-3 font-medium transition hover:bg-violet-500"
+              >
+                Google でログイン
+              </a>
+            </div>
+          )}
         </section>
 
         <section id="api" className="mt-8 rounded-2xl border border-white/10 bg-slate-900/60 p-6">

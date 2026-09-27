@@ -3,6 +3,9 @@ import { bearerAuth } from "hono/bearer-auth";
 import { sha256 } from "hono/utils/crypto";
 import { timingSafeEqual } from "hono/utils/buffer";
 import { inertia } from "@hono/inertia";
+import { googleAuth } from "@hono/oauth-providers/google";
+import { DEV_USER, sessionMiddleware, signIn, signOut } from "./auth";
+import { upsertUser } from "./db/users";
 import { rootView } from "./root-view";
 import type { Env } from "./global";
 import {
@@ -14,7 +17,7 @@ import {
   parseCreateTokenInput,
   type Room,
 } from "./domain/room";
-import { deleteRoomRow, findRoom, insertRoom } from "./db/rooms";
+import { deleteRoomRow, findRoom, insertRoom, listOwnedRooms } from "./db/rooms";
 import { signInvite, signSession, verifyInvite, verifySession } from "./lib/tokens";
 import { SFU_PROXY_ROUTES, createSfuSession, isSfuProxyAction, sfuConfig, sfuFetch } from "./lib/sfu";
 import { PARTICIPANT_HEADER, type ConnectingParticipant } from "./room-do";
@@ -41,7 +44,7 @@ function publicRoom(c: Context<Env>, room: Room) {
   };
 }
 
-async function createRoom(c: Context<Env>, body: unknown) {
+async function createRoom(c: Context<Env>, body: unknown, ownerId: string | null) {
   const parsed = parseCreateRoomInput(body);
   if (!parsed.ok) return parsed;
   const now = new Date();
@@ -51,6 +54,7 @@ async function createRoom(c: Context<Env>, body: unknown) {
     maxParticipants: parsed.value.maxParticipants,
     guestAccess: parsed.value.guestAccess,
     externalId: parsed.value.externalId,
+    ownerId,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + parsed.value.expiresInSec * 1000).toISOString(),
   };
@@ -60,6 +64,10 @@ async function createRoom(c: Context<Env>, body: unknown) {
     roomStub(c, room.id).init({ maxParticipants: room.maxParticipants, expiresAt: room.expiresAt }),
   ]);
   return { ok: true as const, room, manageKey };
+}
+
+async function destroyRoom(c: Context<Env>, id: string) {
+  await Promise.all([deleteRoomRow(c.env.DB, id), roomStub(c, id).deleteRoom()]);
 }
 
 const isApiKey = (token: string, c: Context<Env>) => !!c.env.API_KEY && timingSafeEqual(token, c.env.API_KEY);
@@ -86,7 +94,7 @@ const requireApiKeyOrManageKey = bearerAuth<Env>({
 });
 
 api.post("/rooms", requireApiKey, async (c) => {
-  const result = await createRoom(c, await jsonBody(c));
+  const result = await createRoom(c, await jsonBody(c), null);
   if (!result.ok) return c.json({ error: result.error }, 400);
   return c.json({ ...publicRoom(c, result.room), manageKey: result.manageKey }, 201);
 });
@@ -105,7 +113,7 @@ api.delete("/rooms/:id", requireApiKeyOrManageKey, async (c) => {
   const id = c.req.param("id");
   const room = c.get("room") ?? (await findRoom(c.env.DB, id));
   if (!room) return c.json({ error: "Not found" }, 404);
-  await Promise.all([deleteRoomRow(c.env.DB, id), roomStub(c, id).deleteRoom()]);
+  await destroyRoom(c, id);
   return c.body(null, 204);
 });
 
@@ -205,23 +213,60 @@ app.get("/api/rooms/:id/ws", async (c) => {
   return roomStub(c, roomId).fetch(new Request(c.req.raw.url, { headers }));
 });
 
+// --- ログイン（ルーム作成に必要。参加はアカウント不要） ---
+
+app.use(sessionMiddleware);
+
+app.get(
+  "/auth/google",
+  async (c, next) => {
+    if (!c.env.DEV_BYPASS_AUTH) return next();
+    await signIn(c, await upsertUser(c.env.DB, DEV_USER));
+    return c.redirect("/");
+  },
+  googleAuth({ scope: ["openid", "email", "profile"], prompt: "select_account" }),
+  async (c) => {
+    const google = c.get("user-google");
+    if (!google?.email) return c.redirect("/?error=auth");
+    const user = await upsertUser(c.env.DB, { email: google.email, name: google.name ?? google.email, avatarUrl: google.picture ?? "" });
+    await signIn(c, user);
+    return c.redirect("/");
+  },
+);
+
+app.get("/auth/logout", (c) => {
+  signOut(c);
+  return c.redirect("/");
+});
+
 // --- Inertia pages ---
 
-app.use(inertia({ rootView }));
+app.use(inertia<Env>()({ rootView, share: (c) => ({ user: c.get("user") }) }));
 
 const routes = app
   .get("/", (c) => c.render("Home", {}))
-  .post("/rooms", async (c) => {
-    // Web から作るルームは常にゲスト参加可
-    const result = await createRoom(c, { ...((await jsonBody(c)) as object), guestAccess: true, externalId: null });
-    if (!result.ok) return c.render("Home", { error: result.error }, { url: "/" });
-    return c.render(
-      "Rooms/Created",
-      { room: publicRoom(c, result.room), manageKey: result.manageKey },
-      { url: `/r/${result.room.id}/created` },
-    );
+  .get("/rooms", async (c) => {
+    const user = c.get("user");
+    if (!user) return c.redirect("/auth/google");
+    const rooms = await listOwnedRooms(c.env.DB, user.id, new Date());
+    return c.render("Rooms/Index", { rooms: rooms.map((r) => publicRoom(c, r)) });
   })
-  // 作成直後ページのリロード（管理キーは一度しか見せない）
+  .post("/rooms", async (c) => {
+    const user = c.get("user");
+    if (!user) return c.redirect("/auth/google");
+    // Web から作るルームは常にゲスト参加可
+    const result = await createRoom(c, { ...((await jsonBody(c)) as object), guestAccess: true, externalId: null }, user.id);
+    if (!result.ok) return c.render("Home", { error: result.error }, { url: "/" });
+    return c.render("Rooms/Created", { room: publicRoom(c, result.room) }, { url: `/r/${result.room.id}/created` });
+  })
+  .delete("/rooms/:id", async (c) => {
+    const user = c.get("user");
+    const room = await findRoom(c.env.DB, c.req.param("id"));
+    if (!user || !room || room.ownerId !== user.id) return c.notFound();
+    await destroyRoom(c, room.id);
+    return c.redirect("/rooms");
+  })
+  // 作成直後ページのリロード
   .get("/r/:id/created", (c) => c.redirect(`/r/${c.req.param("id")}`))
   .get("/r/:id", async (c) => {
     const room = await findRoom(c.env.DB, c.req.param("id"));
@@ -235,9 +280,11 @@ const routes = app
     }
     const token = c.req.query("token") ?? null;
     const invite = token ? await verifyInvite(token, c.env.TOKEN_SECRET, room.id) : null;
+    const user = c.get("user");
     return c.render("Rooms/Show", {
       room: publicRoom(c, room),
       invite: token ? { token, valid: !!invite, name: invite?.name ?? null } : null,
+      isOwner: !!user && room.ownerId === user.id,
     });
   });
 

@@ -1,18 +1,13 @@
 import { Head, Link } from "@inertiajs/react";
-import { useEffect } from "react";
 import { Logo } from "../../components/Logo";
 import { useCopy } from "../../lib/clipboard";
-import { saveManageKey } from "../../lib/manageKeys";
 import { formatDateTime } from "../../lib/format";
 
 interface Props {
   room: { id: string; name: string; url: string; expiresAt: string; maxParticipants: number };
-  manageKey: string;
 }
 
-export default function Created({ room, manageKey }: Props) {
-  useEffect(() => saveManageKey(room.id, manageKey), [room.id, manageKey]);
-
+export default function Created({ room }: Props) {
   return (
     <div className="mx-auto max-w-xl px-6 py-10">
       <Head title={`${room.name} を作成しました`} />
@@ -25,7 +20,6 @@ export default function Created({ room, manageKey }: Props) {
         </p>
 
         <CopyField label="招待 URL（参加者に共有）" value={room.url} />
-        <CopyField label="管理キー（ルームの削除に使います。このページでしか表示されません）" value={manageKey} secret />
 
         <Link
           href={`/r/${room.id}`}
@@ -33,12 +27,15 @@ export default function Created({ room, manageKey }: Props) {
         >
           ルームに入る
         </Link>
+        <Link href="/rooms" className="mt-3 block text-center text-sm text-slate-400 hover:text-slate-200">
+          マイルームへ
+        </Link>
       </div>
     </div>
   );
 }
 
-function CopyField({ label, value, secret }: { label: string; value: string; secret?: boolean }) {
+function CopyField({ label, value }: { label: string; value: string }) {
   const [copied, copy] = useCopy();
   return (
     <div className="mt-6">
@@ -48,7 +45,7 @@ function CopyField({ label, value, secret }: { label: string; value: string; sec
           readOnly
           value={value}
           onFocus={(e) => e.target.select()}
-          className={`min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm ${secret ? "font-mono text-amber-200" : ""}`}
+          className="min-w-0 flex-1 rounded-lg border border-white/10 bg-slate-950 px-3 py-2 text-sm"
         />
         <button
           type="button"

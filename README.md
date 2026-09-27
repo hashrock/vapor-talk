@@ -1,6 +1,6 @@
 # vapor-talk
 
-ブラウザで使える軽量なボイスチャット。アカウント不要で、招待 URL を共有するだけで最大 20 人と音声通話・画面共有ができる。外部サービスから REST API で通話ルームを作成できる。
+ブラウザで使える軽量なボイスチャット。ルームの作成には Google ログインが必要だが、参加はアカウント不要で、招待 URL を共有するだけで最大 20 人と音声通話・画面共有ができる。外部サービスから REST API で通話ルームを作成できる。
 
 ## 構成
 
@@ -8,7 +8,8 @@
 | --- | --- |
 | UI | React + TypeScript + Vite（Inertia: `@hono/inertia` + `@inertiajs/react`、Tailwind） |
 | API | Cloudflare Workers + Hono（`app/app.ts`） |
-| DB | D1（`rooms` テーブル。`migrations/`） |
+| DB | D1（`rooms` / `users` テーブル。`migrations/`） |
+| ログイン | Google OAuth（`@hono/oauth-providers`）+ 署名付き Cookie（`app/auth.ts`）。ルーム作成・マイルーム・削除に使う |
 | リアルタイム | Durable Objects（`app/room-do.ts`。1ルーム=1インスタンス、在室者と公開トラックを WebSocket で配る） |
 | 通話 | WebRTC + Cloudflare Realtime SFU（`app/client/callSession.ts`。SFU の App トークンはサーバーの中継 `/api/rooms/:id/sfu/*` だけが持つ） |
 
@@ -23,7 +24,7 @@
 
 ```bash
 pnpm install
-cp .dev.vars.example .dev.vars   # CALLS_APP_ID / CALLS_APP_TOKEN を埋める
+cp .dev.vars.example .dev.vars   # CALLS_APP_ID / CALLS_APP_TOKEN を埋める（DEV_BYPASS_AUTH=1 で Google なしに Dev User でログイン）
 pnpm migrate                     # ローカル D1
 pnpm dev
 pnpm test
@@ -40,6 +41,9 @@ pnpm migrate:remote
 wrangler secret put CALLS_APP_TOKEN
 wrangler secret put API_KEY
 wrangler secret put TOKEN_SECRET
+wrangler secret put SESSION_SECRET
+wrangler secret put GOOGLE_ID       # Google OAuth クライアント（リダイレクト URI は https://<host>/auth/google）
+wrangler secret put GOOGLE_SECRET
 # wrangler.jsonc の vars.CALLS_APP_ID を設定
 pnpm deploy
 ```

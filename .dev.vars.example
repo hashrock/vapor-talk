@@ -5,3 +5,11 @@ CALLS_APP_TOKEN=
 API_KEY=dev-api-key
 # 参加トークン / セッションチケットの署名鍵（十分に長いランダム文字列）
 TOKEN_SECRET=dev-token-secret-change-me
+
+# ルーム作成のログイン（Google OAuth）
+GOOGLE_ID=
+GOOGLE_SECRET=
+# ログインセッション Cookie の署名鍵
+SESSION_SECRET=dev-session-secret-change-me
+# ローカル開発用: Google を通さずに Dev User でログインする（本番では設定しない）
+DEV_BYPASS_AUTH=1

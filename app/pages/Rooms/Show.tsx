@@ -1,5 +1,5 @@
-import { Head, Link } from "@inertiajs/react";
-import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Head, Link, router } from "@inertiajs/react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { CallSession, type CallState, type EndReason } from "../../client/callSession";
 import type { Participant } from "../../domain/protocol";
 import { DISPLAY_NAME_MAX } from "../../domain/room";
@@ -7,7 +7,6 @@ import { Logo } from "../../components/Logo";
 import { LinkIcon, MicIcon, MicOffIcon, PhoneOffIcon, ScreenIcon, TrashIcon, UsersIcon, VolumeIcon } from "../../components/icons";
 import { useCopy } from "../../lib/clipboard";
 import { formatRemaining } from "../../lib/format";
-import { forgetManageKey, getManageKey } from "../../lib/manageKeys";
 
 interface RoomProps {
   id: string;
@@ -21,11 +20,13 @@ interface RoomProps {
 interface Props {
   room: RoomProps;
   invite: { token: string; valid: boolean; name: string | null } | null;
+  /** ログイン中のユーザーがこのルームの作成者か（削除ボタンを出す） */
+  isOwner: boolean;
 }
 
 const NAME_KEY = "vapor-talk:name";
 
-export default function Show({ room, invite }: Props) {
+export default function Show({ room, invite, isOwner }: Props) {
   const [session, setSession] = useState<CallSession | null>(null);
 
   useEffect(() => () => session?.leave(), [session]);
@@ -40,7 +41,7 @@ export default function Show({ room, invite }: Props) {
     <>
       <Head title={room.name} />
       {session ? (
-        <Call room={room} session={session} onRejoin={() => setSession(null)} />
+        <Call room={room} isOwner={isOwner} session={session} onRejoin={() => setSession(null)} />
       ) : (
         <Lobby
           room={room}
@@ -132,10 +133,9 @@ const END_MESSAGES: Record<EndReason, string> = {
   error: "接続できませんでした",
 };
 
-function Call({ room, session, onRejoin }: { room: RoomProps; session: CallSession; onRejoin: () => void }) {
+function Call({ room, isOwner, session, onRejoin }: { room: RoomProps; isOwner: boolean; session: CallSession; onRejoin: () => void }) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const [showList, setShowList] = useState(false);
-  const manageKey = useMemo(() => getManageKey(room.id), [room.id]);
 
   if (state.status === "ended") {
     const canRejoin = state.endReason === "left" || state.endReason === "error" || state.endReason === "replaced";
@@ -184,7 +184,7 @@ function Call({ room, session, onRejoin }: { room: RoomProps; session: CallSessi
         session={session}
         showList={showList}
         onToggleList={() => setShowList((v) => !v)}
-        manageKey={manageKey}
+        isOwner={isOwner}
         roomId={room.id}
       />
 
@@ -366,24 +366,21 @@ function Controls({
   session,
   showList,
   onToggleList,
-  manageKey,
+  isOwner,
   roomId,
 }: {
   state: CallState;
   session: CallSession;
   showList: boolean;
   onToggleList: () => void;
-  manageKey: string | null;
+  isOwner: boolean;
   roomId: string;
 }) {
   const canShare = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getDisplayMedia;
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const deleteRoom = async () => {
-    const res = await fetch(`/api/v1/rooms/${roomId}`, { method: "DELETE", headers: { Authorization: `Bearer ${manageKey}` } });
-    if (res.ok || res.status === 404) forgetManageKey(roomId);
-    setConfirmDelete(false);
-  };
+  // 削除すると全員に bye が届き、自分はマイルームへ移る
+  const deleteRoom = () => router.delete(`/rooms/${roomId}`);
 
   return (
     <footer className="flex items-center justify-center gap-3 border-t border-white/10 px-4 py-3">
@@ -409,7 +406,7 @@ function Controls({
       <ControlButton className="lg:hidden" active={showList} onClick={onToggleList} label="参加者">
         <UsersIcon />
       </ControlButton>
-      {manageKey &&
+      {isOwner &&
         (confirmDelete ? (
           <div className="flex items-center gap-2 rounded-full bg-rose-500/10 px-3 py-1.5 text-sm">
             全員を退出させて削除？
