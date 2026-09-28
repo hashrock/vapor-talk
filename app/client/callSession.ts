@@ -7,6 +7,7 @@ import {
   type ServerMessage,
   type TrackKind,
 } from "../domain/protocol";
+import { withOpusDtx } from "./sdp";
 import { bandwidth, sampleStats, type BandwidthStats, type StatsSample } from "./stats";
 import { desiredRemoteTracks, focusedShare, planTrackSync, type RemoteTrackRef } from "./trackPlan";
 
@@ -244,10 +245,14 @@ export class CallSession {
 
   // --- controls ---
 
+  /**
+   * ミュート中は送信そのものを止める（replaceTrack(null)）。track.enabled=false だと
+   * 無音のフレームを送り続けて、聞いている全員分の帯域を使う。
+   */
   setMuted(muted: boolean) {
-    const mic = this.micStream?.getAudioTracks()[0];
+    const mic = this.local.find((l) => l.kind === "mic");
     if (!mic) return;
-    mic.enabled = !muted;
+    void mic.transceiver.sender.replaceTrack(muted ? null : mic.track).catch((e) => console.error("[vapor-talk] mute failed", e));
     this.set({ muted });
     this.send({ type: "update", muted });
   }
@@ -483,12 +488,12 @@ export class CallSession {
   private async pushTracks(tracks: PushTrack[]) {
     const pc = this.pc!;
     const transceivers = tracks.map((t) => pc.addTransceiver(t.track, { direction: "sendonly", sendEncodings: t.encodings }));
-    await pc.setLocalDescription(await pc.createOffer());
+    await pc.setLocalDescription(withOpusDtx(await pc.createOffer()));
     const res = await this.sfu("POST", "tracks/new", {
       sessionDescription: { type: "offer", sdp: pc.localDescription!.sdp },
       tracks: transceivers.map((tr, i) => ({ location: "local", mid: tr.mid, trackName: tracks[i].trackName })),
     });
-    await pc.setRemoteDescription(res.sessionDescription!);
+    await pc.setRemoteDescription(withOpusDtx(res.sessionDescription!));
     tracks.forEach((t, i) => this.local.push({ trackName: t.trackName, kind: t.kind, track: t.track, transceiver: transceivers[i] }));
   }
 
@@ -539,14 +544,14 @@ export class CallSession {
         this.pulled.set(ref.key, { ...ref, mid: r.mid });
       }
       if (res.requiresImmediateRenegotiation && res.sessionDescription) {
-        await this.pc.setRemoteDescription(res.sessionDescription);
+        await this.pc.setRemoteDescription(withOpusDtx(res.sessionDescription));
         // SFU は閉じたトラックの m-line（mid）を使い回すことがある。閉じるときに inactive にした
         // transceiver のままだと answer も inactive になって届かないので、受信に戻す
         const mids = new Set((res.tracks ?? []).map((t) => t.mid));
         for (const tr of this.pc.getTransceivers()) {
           if (tr.mid && mids.has(tr.mid) && tr.direction === "inactive") tr.direction = "recvonly";
         }
-        await this.pc.setLocalDescription(await this.pc.createAnswer());
+        await this.pc.setLocalDescription(withOpusDtx(await this.pc.createAnswer()));
         await this.sfu("PUT", "renegotiate", {
           sessionDescription: { type: "answer", sdp: this.pc.localDescription!.sdp },
         });
@@ -563,13 +568,13 @@ export class CallSession {
     const mids = transceivers.map((t) => t.mid).filter((m): m is string => !!m);
     if (!pc || pc.signalingState === "closed" || mids.length === 0) return;
     for (const t of transceivers) t.direction = "inactive";
-    await pc.setLocalDescription(await pc.createOffer());
+    await pc.setLocalDescription(withOpusDtx(await pc.createOffer()));
     const res = await this.sfu("PUT", "tracks/close", {
       tracks: mids.map((mid) => ({ mid })),
       sessionDescription: { type: "offer", sdp: pc.localDescription!.sdp },
       force: false,
     });
-    if (res.sessionDescription) await pc.setRemoteDescription(res.sessionDescription);
+    if (res.sessionDescription) await pc.setRemoteDescription(withOpusDtx(res.sessionDescription));
   }
 
   private onTrack(e: RTCTrackEvent) {
