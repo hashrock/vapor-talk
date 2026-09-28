@@ -1,5 +1,5 @@
 import { Head, useForm, usePage } from "@inertiajs/react";
-import { MAX_PARTICIPANTS_LIMIT, ROOM_NAME_MAX } from "../domain/room";
+import { DEFAULT_MAX_PARTICIPANTS, ROOM_NAME_MAX } from "../domain/room";
 import { Header } from "../components/Header";
 import type { SessionUser } from "../user";
 import { MicIcon, ScreenIcon, UsersIcon, LinkIcon } from "../components/icons";
@@ -38,12 +38,12 @@ export default function Home({ error }: { error?: string }) {
               <span className="bg-gradient-to-r from-violet-400 to-sky-400 bg-clip-text text-transparent">軽量ボイスチャット</span>
             </h1>
             <p className="mt-5 text-slate-400">
-              聞くだけならアカウント不要。ルームを作って招待 URL を共有すれば、ブラウザだけで最大 {MAX_PARTICIPANTS_LIMIT} 人が参加でき、ホストが指名した人が話せます。
+              聞くだけならアカウント不要。ルームを作って招待 URL を共有すれば、ブラウザだけで最大 {DEFAULT_MAX_PARTICIPANTS} 人が参加でき、ホストが指名した人が話せます。
             </p>
             <ul className="mt-8 grid grid-cols-2 gap-3 text-sm text-slate-300">
               <Feature icon={<MicIcon />} text="高音質な音声通話" />
               <Feature icon={<ScreenIcon />} text="画面共有" />
-              <Feature icon={<UsersIcon />} text={`最大 ${MAX_PARTICIPANTS_LIMIT} 人`} />
+              <Feature icon={<UsersIcon />} text={`最大 ${DEFAULT_MAX_PARTICIPANTS} 人`} />
               <Feature icon={<LinkIcon />} text="REST API で外部連携" />
             </ul>
           </div>

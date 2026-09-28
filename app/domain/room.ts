@@ -1,7 +1,8 @@
 import type { Role } from "./protocol";
 
-/** 1ルームの参加上限（MVP の目標値）。 */
-export const MAX_PARTICIPANTS_LIMIT = 20;
+/** 1ルームの参加上限（スピーカーとリスナーの合計）。リスナーは SFU から受け取るだけなので多くてよい */
+export const MAX_PARTICIPANTS_LIMIT = 200;
+export const DEFAULT_MAX_PARTICIPANTS = 100;
 export const DEFAULT_EXPIRES_IN_SEC = 24 * 60 * 60;
 export const MIN_EXPIRES_IN_SEC = 5 * 60;
 export const MAX_EXPIRES_IN_SEC = 7 * 24 * 60 * 60;
@@ -57,7 +58,7 @@ export function parseCreateRoomInput(body: unknown): Parsed<CreateRoomInput> {
     expiresInSec = b.expiresIn;
   }
 
-  let maxParticipants = MAX_PARTICIPANTS_LIMIT;
+  let maxParticipants = DEFAULT_MAX_PARTICIPANTS;
   if (b.maxParticipants !== undefined) {
     if (!intInRange(b.maxParticipants, 2, MAX_PARTICIPANTS_LIMIT)) {
       return { ok: false, error: `maxParticipants must be an integer between 2 and ${MAX_PARTICIPANTS_LIMIT}` };

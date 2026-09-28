@@ -1,6 +1,6 @@
 # vapor-talk
 
-ブラウザで使える軽量なボイスチャット。ルームの作成と、話す（スピーカーになる）には Google ログインが必要だが、聞くだけならアカウント不要で、招待 URL を共有するだけで最大 20 人が参加できる。外部サービスから REST API で通話ルームを作成できる。
+ブラウザで使える軽量なボイスチャット。ルームの作成と、話す（スピーカーになる）には Google ログインが必要だが、聞くだけならアカウント不要で、招待 URL を共有するだけで最大 200 人（既定 100 人）が参加できる。外部サービスから REST API で通話ルームを作成できる。
 
 ### 役割
 
@@ -31,6 +31,8 @@ API で作ったルームにはホストがいない。参加トークンの `ro
 4. 他の参加者の公開トラックを pull する（差分計算は `app/client/trackPlan.ts`）
 
 ロールは RoomDO だけが持つ。SFU 中継は push（`location: "local"`）の前に RoomDO に聞いてリスナーなら 403 を返し、RoomDO はリスナーの `update` の公開トラックを捨てる。
+
+RoomDO が個別に配るのは、見える参加者（スピーカーと自分。ホストには全員）の変化だけ。リスナーの出入りは配らず、リスナー数を 3 秒ごとにまとめて `listeners` で配る（100 人の出入りで全員に 1 万通、にならないように）。
 
 ## 開発
 
@@ -66,7 +68,7 @@ pnpm deploy
 
 | メソッド | パス | 内容 |
 | --- | --- | --- |
-| POST | `/api/v1/rooms` | ルーム作成。`{ name?, expiresIn?(秒, 300〜604800, 既定 86400), maxParticipants?(2〜20), guestAccess?(既定 true), externalId? }` → ルーム + `manageKey` |
+| POST | `/api/v1/rooms` | ルーム作成。`{ name?, expiresIn?(秒, 300〜604800, 既定 86400), maxParticipants?(2〜200, 既定 100), guestAccess?(既定 true), externalId? }` → ルーム + `manageKey` |
 | GET | `/api/v1/rooms/:id` | ルーム情報と在室者（`role` 付き） |
 | DELETE | `/api/v1/rooms/:id` | 削除（在室者は切断）。API キーの代わりに作成時の `manageKey` でも可 |
 | POST | `/api/v1/rooms/:id/tokens` | 参加トークン発行。`{ name?, role?("speaker" \| "listener", 既定 "speaker"), expiresIn? }` → `{ token, url }`。`name` を入れると表示名が固定される |

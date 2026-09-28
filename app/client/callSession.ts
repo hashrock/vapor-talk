@@ -34,7 +34,10 @@ export interface CallState {
   endReason: EndReason | null;
   error: string | null;
   selfId: string | null;
+  /** 自分に見える参加者（スピーカーと自分。ホストなら全員） */
   participants: Participant[];
+  /** リスナーの総数（数秒遅れで届く） */
+  listenerCount: number;
   /** participantId → 受信中のメディア。自分の画面共有もここに入る（自分の mic は入れない）。 */
   media: Record<string, ParticipantMedia>;
   /** participantId → 0..1 */
@@ -128,6 +131,7 @@ export class CallSession {
     error: null,
     selfId: null,
     participants: [],
+    listenerCount: 0,
     media: {},
     volumes: {},
     micAvailable: false,
@@ -378,7 +382,7 @@ export class CallSession {
         return;
       case "welcome":
         this.reconnects = 0;
-        this.set({ status: "connected", participants: msg.participants, expiresAt: msg.expiresAt });
+        this.set({ status: "connected", participants: msg.participants, listenerCount: msg.listeners, expiresAt: msg.expiresAt });
         // 再接続時も含め、自分の公開トラックとミュート状態を送り直す
         this.publish();
         this.followRole();
@@ -393,6 +397,9 @@ export class CallSession {
         this.set({ participants: this.state.participants.filter((p) => p.id !== msg.id), media });
         break;
       }
+      case "listeners":
+        this.set({ listenerCount: msg.count });
+        return;
       case "pong":
         return;
     }
