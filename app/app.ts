@@ -4,12 +4,13 @@ import { sha256 } from "hono/utils/crypto";
 import { timingSafeEqual } from "hono/utils/buffer";
 import { inertia } from "@hono/inertia";
 import { googleAuth } from "@hono/oauth-providers/google";
-import { DEV_USER, sessionMiddleware, signIn, signOut } from "./auth";
+import { DEV_USER, rememberReturnTo, safePath, sessionMiddleware, signIn, signOut, takeReturnTo } from "./auth";
 import { upsertUser } from "./db/users";
 import { rootView } from "./root-view";
 import type { Env } from "./global";
 import {
   isExpired,
+  isRecord,
   newManageKey,
   newRoomId,
   normalizeDisplayName,
@@ -21,8 +22,12 @@ import { deleteRoomRow, findRoom, insertRoom, listOwnedRooms } from "./db/rooms"
 import { signInvite, signSession, verifyInvite, verifySession } from "./lib/tokens";
 import { SFU_PROXY_ROUTES, createSfuSession, isSfuProxyAction, sfuConfig, sfuFetch } from "./lib/sfu";
 import { PARTICIPANT_HEADER, type ConnectingParticipant } from "./room-do";
+import type { Role } from "./domain/protocol";
 
 const app = new Hono<Env>();
+
+// ログイン状態は、ページのほか入室（スピーカーになれるか・ホストか）でも使う
+app.use(sessionMiddleware);
 
 /** セッションチケットの寿命（1回の通話の上限）。ルームの期限のほうが短ければそちら。 */
 const SESSION_TTL_SEC = 12 * 60 * 60;
@@ -61,7 +66,7 @@ async function createRoom(c: Context<Env>, body: unknown, ownerId: string | null
   const manageKey = newManageKey();
   await Promise.all([
     insertRoom(c.env.DB, room, (await sha256(manageKey))!),
-    roomStub(c, room.id).init({ maxParticipants: room.maxParticipants, expiresAt: room.expiresAt }),
+    roomStub(c, room.id).init({ maxParticipants: room.maxParticipants, expiresAt: room.expiresAt, hosted: ownerId !== null }),
   ]);
   return { ok: true as const, room, manageKey };
 }
@@ -105,7 +110,13 @@ api.get("/rooms/:id", requireApiKey, async (c) => {
   const participants = await roomStub(c, room.id).participants();
   return c.json({
     ...publicRoom(c, room),
-    participants: participants.map((p) => ({ id: p.id, name: p.name, muted: p.muted, joinedAt: new Date(p.joinedAt).toISOString() })),
+    participants: participants.map((p) => ({
+      id: p.id,
+      name: p.name,
+      role: p.role,
+      muted: p.muted,
+      joinedAt: new Date(p.joinedAt).toISOString(),
+    })),
   });
 });
 
@@ -124,12 +135,13 @@ api.post("/rooms/:id/tokens", requireApiKey, async (c) => {
   const parsed = parseCreateTokenInput(await jsonBody(c), room, now);
   if (!parsed.ok) return c.json({ error: parsed.error }, 400);
   const exp = Math.floor(now.getTime() / 1000) + parsed.value.expiresInSec;
-  const token = await signInvite({ room: room.id, name: parsed.value.name, exp }, c.env.TOKEN_SECRET);
+  const token = await signInvite({ room: room.id, name: parsed.value.name, role: parsed.value.role, exp }, c.env.TOKEN_SECRET);
   return c.json(
     {
       token,
       url: `${origin(c)}/r/${room.id}?token=${encodeURIComponent(token)}`,
       name: parsed.value.name,
+      role: parsed.value.role,
       expiresAt: new Date(exp * 1000).toISOString(),
     },
     201,
@@ -149,10 +161,12 @@ app.post("/api/rooms/:id/join", async (c) => {
 
   const body = (await jsonBody(c)) as { name?: unknown; token?: unknown };
   let name = typeof body.name === "string" ? normalizeDisplayName(body.name) : null;
+  let invitedRole: Role | null = null;
   if (typeof body.token === "string" && body.token) {
     const invite = await verifyInvite(body.token, c.env.TOKEN_SECRET, room.id);
     if (!invite) return c.json({ error: "参加トークンが無効か期限切れです" }, 403);
     if (invite.name) name = invite.name;
+    invitedRole = invite.role;
   } else if (!room.guestAccess) {
     return c.json({ error: "このルームへの参加には招待トークンが必要です" }, 403);
   }
@@ -174,9 +188,27 @@ app.post("/api/rooms/:id/join", async (c) => {
 
   const participantId = crypto.randomUUID();
   const exp = Math.min(Math.floor(now.getTime() / 1000) + SESSION_TTL_SEC, Math.floor(Date.parse(room.expiresAt) / 1000));
-  const ticket = await signSession({ room: room.id, pid: participantId, sid: sessionId, name, exp }, c.env.TOKEN_SECRET);
+  const user = c.get("user");
+  const ticket = await signSession(
+    {
+      room: room.id,
+      pid: participantId,
+      sid: sessionId,
+      name,
+      uid: user?.id ?? null,
+      host: !!user && room.ownerId === user.id,
+      invitedRole,
+      exp,
+    },
+    c.env.TOKEN_SECRET,
+  );
   return c.json({ participantId, ticket });
 });
+
+function pushesLocalTrack(body: unknown): boolean {
+  const tracks = isRecord(body) && Array.isArray(body.tracks) ? body.tracks : [];
+  return tracks.some((t) => !isRecord(t) || t.location !== "remote");
+}
 
 /** SFU への中継。チケットに書かれた自分のセッションだけを操作できる。 */
 const requireSession = bearerAuth<Env>({
@@ -196,7 +228,12 @@ app.on(["POST", "PUT"], "/api/rooms/:id/sfu/:action{.+}", requireSession, async 
   if (!sfu) return c.json({ error: "SFU is not configured" }, 503);
 
   const body = await c.req.json().catch(() => undefined);
-  const res = await sfuFetch(sfu, route.method, route.path(c.get("claims")!.sid), body);
+  const claims = c.get("claims")!;
+  // push（location: "local"）はスピーカーだけ。今のロールは RoomDO に聞く（チケットのロールは古くなりうる）
+  if (action === "tracks/new" && pushesLocalTrack(body) && !(await roomStub(c, claims.room).canPublish(claims.pid))) {
+    return c.json({ errorCode: "forbidden", errorDescription: "リスナーは送信できません" }, 403);
+  }
+  const res = await sfuFetch(sfu, route.method, route.path(claims.sid), body);
   return new Response(res.body, { status: res.status, headers: { "Content-Type": "application/json" } });
 });
 
@@ -207,22 +244,35 @@ app.get("/api/rooms/:id/ws", async (c) => {
   const claims = await verifySession(c.req.query("ticket") ?? "", c.env.TOKEN_SECRET, roomId);
   if (!claims) return c.text("Unauthorized", 401);
 
-  const joining: ConnectingParticipant = { id: claims.pid, name: claims.name, sessionId: claims.sid };
+  const joining: ConnectingParticipant = {
+    id: claims.pid,
+    name: claims.name,
+    sessionId: claims.sid,
+    userId: claims.uid ?? null,
+    host: claims.host ?? false,
+    invitedRole: claims.invitedRole ?? null,
+  };
   const headers = new Headers(c.req.raw.headers);
   headers.set(PARTICIPANT_HEADER, JSON.stringify(joining));
   return roomStub(c, roomId).fetch(new Request(c.req.raw.url, { headers }));
 });
 
-// --- ログイン（ルーム作成に必要。参加はアカウント不要） ---
-
-app.use(sessionMiddleware);
+// --- ログイン（ルーム作成とスピーカーに必要。聞くだけならアカウント不要） ---
 
 app.get(
   "/auth/google",
   async (c, next) => {
-    if (!c.env.DEV_BYPASS_AUTH) return next();
-    await signIn(c, await upsertUser(c.env.DB, DEV_USER));
-    return c.redirect("/");
+    // ?next= はログイン後に戻るページ（ルームから「ログインして挙手」したとき）
+    const next_ = c.req.query("next");
+    if (!c.env.DEV_BYPASS_AUTH) {
+      // Google から戻ってくる（?code=）までの間、戻り先を Cookie に覚えておく
+      if (next_ !== undefined) rememberReturnTo(c, next_);
+      return next();
+    }
+    // ?as=alice で別のユーザー（alice@localhost）としてログインする。役割の確認用
+    const as = c.req.query("as")?.replace(/[^a-z0-9_-]/gi, "").slice(0, 20);
+    await signIn(c, await upsertUser(c.env.DB, as ? { email: `${as}@localhost`, name: as, avatarUrl: "" } : DEV_USER));
+    return c.redirect(safePath(next_) ?? "/");
   },
   googleAuth({ scope: ["openid", "email", "profile"], prompt: "select_account" }),
   async (c) => {
@@ -230,7 +280,7 @@ app.get(
     if (!google?.email) return c.redirect("/?error=auth");
     const user = await upsertUser(c.env.DB, { email: google.email, name: google.name ?? google.email, avatarUrl: google.picture ?? "" });
     await signIn(c, user);
-    return c.redirect("/");
+    return c.redirect(takeReturnTo(c));
   },
 );
 
@@ -285,6 +335,8 @@ const routes = app
       room: publicRoom(c, room),
       invite: token ? { token, valid: !!invite, name: invite?.name ?? null } : null,
       isOwner: !!user && room.ownerId === user.id,
+      /** ホストのいるルーム（挙手できる） */
+      hosted: room.ownerId !== null,
     });
   });
 

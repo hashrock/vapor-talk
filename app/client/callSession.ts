@@ -13,6 +13,7 @@ import { desiredRemoteTracks, focusedShare, planTrackSync, type RemoteTrackRef }
 /**
  * 1回の通話。ルームの WebSocket（在室・公開トラックの共有）と、
  * SFU への RTCPeerConnection（音声・画面の送受信）を1本ずつ持つ。
+ * マイクを取るのはスピーカーのときだけ。ロールは RoomDO が決め、変わったら（昇格・降格）追従する。
  *
  * SFU とのネゴシエーションは直列でしか正しく動かないので、すべて `serial` に積む。
  * React からは subscribe / getSnapshot（useSyncExternalStore）で状態を読む。
@@ -129,7 +130,7 @@ export class CallSession {
     media: {},
     volumes: {},
     micAvailable: false,
-    muted: false,
+    muted: true,
     sharing: false,
     selectedShare: null,
     expiresAt: null,
@@ -145,7 +146,10 @@ export class CallSession {
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
   private local: LocalTrack[] = [];
+  /** スピーカーとしてマイクを使う（取得中を含む）。降格で false */
+  private micWanted = false;
   private micStream: MediaStream | null = null;
+  private micSeq = 0;
   private screenStream: MediaStream | null = null;
   private screenSeq = 0;
 
@@ -185,7 +189,7 @@ export class CallSession {
 
   // --- lifecycle ---
 
-  /** 入室。ボタン押下から呼ぶこと（マイク許可と音声の自動再生のため）。 */
+  /** 入室。ボタン押下から呼ぶこと（音声の自動再生のため）。マイクはスピーカーになってから取る。 */
   async start(): Promise<void> {
     try {
       this.audioCtx = new AudioContext();
@@ -199,29 +203,14 @@ export class CallSession {
       this.join = body as JoinResponse;
       this.set({ selfId: this.join.participantId });
 
-      try {
-        this.micStream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-        });
-      } catch {
-        // マイクが無い・拒否された場合は聞き専で入る
-        this.micStream = null;
-      }
-
       this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS, bundlePolicy: "max-bundle" });
       this.pc.ontrack = (e) => this.onTrack(e);
       this.pc.onconnectionstatechange = () => {
         if (this.pc?.connectionState === "failed") this.fail("通話サーバーとの接続が切れました");
       };
-
-      const mic = this.micStream?.getAudioTracks()[0];
-      if (mic) {
-        await this.enqueue(() => this.pushTracks([{ track: mic, trackName: "mic", kind: "mic" }]));
-        this.watchLevel(this.join.participantId, this.micStream!);
-      }
-      this.set({ micAvailable: !!mic, muted: !mic });
       this.levelTimer = setInterval(() => this.updateSpeaking(), 120);
 
+      // 自分のロールは welcome で分かる。スピーカーならそこでマイクを取る（followRole）
       this.openSocket();
     } catch (e) {
       this.fail(e instanceof Error ? e.message : String(e));
@@ -273,8 +262,28 @@ export class CallSession {
     this.scheduleSync();
   }
 
+  /** 挙手 / 取り下げ（ログイン済みのリスナー） */
+  raiseHand(raised: boolean) {
+    this.send({ type: "hand", raised });
+  }
+
+  /** ホスト: リスナーをスピーカーにする（挙手の許可・指名） */
+  promote(participantId: string) {
+    this.send({ type: "promote", id: participantId });
+  }
+
+  /** ホスト: スピーカーをリスナーに戻す */
+  demote(participantId: string) {
+    this.send({ type: "demote", id: participantId });
+  }
+
+  /** ホスト: 挙手を却下する */
+  rejectHand(participantId: string) {
+    this.send({ type: "reject", id: participantId });
+  }
+
   async startScreenShare(): Promise<void> {
-    if (this.state.sharing || !this.join) return;
+    if (this.state.sharing || !this.join || this.self()?.role !== "speaker") return;
     let stream: MediaStream;
     try {
       stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: true });
@@ -367,10 +376,12 @@ export class CallSession {
         this.set({ status: "connected", participants: msg.participants, expiresAt: msg.expiresAt });
         // 再接続時も含め、自分の公開トラックとミュート状態を送り直す
         this.publish();
+        this.followRole();
         break;
       case "joined":
       case "updated":
         this.set({ participants: upsert(this.state.participants, msg.participant) });
+        if (msg.participant.id === this.state.selfId) this.followRole();
         break;
       case "left": {
         const { [msg.id]: _, ...media } = this.state.media;
@@ -385,6 +396,62 @@ export class CallSession {
 
   private send(msg: ClientMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+  }
+
+  private self(): Participant | undefined {
+    return this.state.participants.find((p) => p.id === this.state.selfId);
+  }
+
+  /** 自分のロールに合わせてマイクを取る・手放す。 */
+  private followRole() {
+    const role = this.self()?.role;
+    if (role === "speaker" && !this.micWanted) void this.startMic();
+    else if (role === "listener" && this.micWanted) void this.stopMic();
+  }
+
+  private async startMic() {
+    this.micWanted = true;
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch {
+      // マイクが無い・拒否された場合は聞くだけのスピーカーになる
+      return;
+    }
+    // 許可を待つ間に降格・退出していたら使わない
+    if (!this.micWanted || this.state.status === "ended" || !this.join) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const mic = stream.getAudioTracks()[0];
+    try {
+      await this.enqueue(() => this.pushTracks([{ track: mic, trackName: `mic-${++this.micSeq}`, kind: "mic" }]));
+    } catch (e) {
+      console.error("[vapor-talk] mic push failed", e);
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    this.micStream = stream;
+    this.watchLevel(this.join.participantId, stream);
+    this.set({ micAvailable: true, muted: false });
+    this.publish();
+    // push の間に降格されていたら閉じる
+    if (!this.micWanted) await this.stopMic();
+  }
+
+  private async stopMic() {
+    this.micWanted = false;
+    await this.stopScreenShare();
+    this.micStream?.getTracks().forEach((t) => t.stop());
+    this.micStream = null;
+    if (this.join) this.unwatchLevel(this.join.participantId);
+    const closing = this.local.filter((l) => l.kind === "mic");
+    this.local = this.local.filter((l) => l.kind !== "mic");
+    this.set({ micAvailable: false, muted: true });
+    this.publish();
+    await this.enqueue(() => this.closeTransceivers(closing.map((l) => l.transceiver)));
   }
 
   private publish() {

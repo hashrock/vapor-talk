@@ -1,13 +1,16 @@
 import { sign, verify } from "hono/jwt";
+import type { Role } from "../domain/protocol";
 
 /**
  * 外部サービスが発行する参加トークン（招待 URL の ?token=）。
  * guestAccess=false のルームにはこれが無いと入れない。name があれば表示名を固定する。
+ * role はスピーカーとして入るかリスナーとして入るか（role の無い古いトークンはスピーカー）。
  */
 export interface InviteClaims {
   typ: "invite";
   room: string;
   name: string | null;
+  role: Role;
   exp: number;
 }
 
@@ -21,6 +24,12 @@ export interface SessionClaims {
   pid: string;
   sid: string;
   name: string;
+  /** ログイン中のユーザー（未ログインは null） */
+  uid: string | null;
+  /** ルームの作成者 */
+  host: boolean;
+  /** 参加トークンで指定されたロール（トークンなしは null）。今のロールは RoomDO が持つ */
+  invitedRole: Role | null;
   exp: number;
 }
 
@@ -45,7 +54,7 @@ async function verifyTyped(token: string, secret: string): Promise<Record<string
 export async function verifyInvite(token: string, secret: string, roomId: string): Promise<InviteClaims | null> {
   const p = await verifyTyped(token, secret);
   if (!p || p.typ !== "invite" || p.room !== roomId) return null;
-  return p as unknown as InviteClaims;
+  return { ...(p as unknown as InviteClaims), role: p.role === "listener" ? "listener" : "speaker" };
 }
 
 export async function verifySession(token: string, secret: string, roomId: string): Promise<SessionClaims | null> {

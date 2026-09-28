@@ -1,3 +1,5 @@
+import type { Role } from "./protocol";
+
 /** 1ルームの参加上限（MVP の目標値）。 */
 export const MAX_PARTICIPANTS_LIMIT = 20;
 export const DEFAULT_EXPIRES_IN_SEC = 24 * 60 * 60;
@@ -82,6 +84,7 @@ export function parseCreateRoomInput(body: unknown): Parsed<CreateRoomInput> {
 
 export interface CreateTokenInput {
   name: string | null;
+  role: Role;
   expiresInSec: number;
 }
 
@@ -94,6 +97,11 @@ export function parseCreateTokenInput(body: unknown, room: Room, now: Date): Par
     if (!n) return { ok: false, error: `name must be a non-empty string of at most ${DISPLAY_NAME_MAX} characters` };
     name = n;
   }
+  let role: Role = "speaker";
+  if (b.role !== undefined) {
+    if (b.role !== "speaker" && b.role !== "listener") return { ok: false, error: 'role must be "speaker" or "listener"' };
+    role = b.role;
+  }
   const remaining = Math.floor((Date.parse(room.expiresAt) - now.getTime()) / 1000);
   let expiresInSec = remaining;
   if (b.expiresIn !== undefined) {
@@ -102,7 +110,7 @@ export function parseCreateTokenInput(body: unknown, room: Room, now: Date): Par
     }
     expiresInSec = Math.min(b.expiresIn, remaining);
   }
-  return { ok: true, value: { name, expiresInSec } };
+  return { ok: true, value: { name, role, expiresInSec } };
 }
 
 /** 表示名を正規化する。空・長すぎる名前は null。 */
