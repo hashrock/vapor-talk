@@ -5,8 +5,9 @@ import type { Participant } from "../../domain/protocol";
 import { focusedShare } from "../../client/trackPlan";
 import type { BandwidthStats } from "../../client/stats";
 import { DISPLAY_NAME_MAX } from "../../domain/room";
+import { MAX_SPEAKERS } from "../../domain/stage";
 import { Logo } from "../../components/Logo";
-import { ChartIcon, LinkIcon, MicIcon, MicOffIcon, PhoneOffIcon, ScreenIcon, TrashIcon, UsersIcon, VolumeIcon } from "../../components/icons";
+import { ChartIcon, HandIcon, LinkIcon, MicIcon, MicOffIcon, PhoneOffIcon, ScreenIcon, TrashIcon, UsersIcon, VolumeIcon } from "../../components/icons";
 import { useCopy } from "../../lib/clipboard";
 import { formatRemaining } from "../../lib/format";
 
@@ -24,11 +25,13 @@ interface Props {
   invite: { token: string; valid: boolean; name: string | null } | null;
   /** ログイン中のユーザーがこのルームの作成者か（削除ボタンを出す） */
   isOwner: boolean;
+  /** ホストのいるルームか（挙手できる）。API で作ったルームは false */
+  hosted: boolean;
 }
 
 const NAME_KEY = "vapor-talk:name";
 
-export default function Show({ room, invite, isOwner }: Props) {
+export default function Show({ room, invite, isOwner, hosted }: Props) {
   const [session, setSession] = useState<CallSession | null>(null);
 
   useEffect(() => () => session?.leave(), [session]);
@@ -43,7 +46,7 @@ export default function Show({ room, invite, isOwner }: Props) {
     <>
       <Head title={room.name} />
       {session ? (
-        <Call room={room} isOwner={isOwner} session={session} onRejoin={() => setSession(null)} />
+        <Call room={room} isOwner={isOwner} hosted={hosted} session={session} onRejoin={() => setSession(null)} />
       ) : (
         <Lobby
           room={room}
@@ -115,7 +118,7 @@ function Lobby({ room, invite, onJoin }: { room: RoomProps; invite: Props["invit
               >
                 <MicIcon /> 参加する
               </button>
-              <p className="mt-3 text-center text-xs text-slate-500">参加するとマイクの使用許可を求められます</p>
+              <p className="mt-3 text-center text-xs text-slate-500">スピーカーになるとマイクの使用許可を求められます</p>
             </>
           )}
         </form>
@@ -135,7 +138,19 @@ const END_MESSAGES: Record<EndReason, string> = {
   error: "接続できませんでした",
 };
 
-function Call({ room, isOwner, session, onRejoin }: { room: RoomProps; isOwner: boolean; session: CallSession; onRejoin: () => void }) {
+function Call({
+  room,
+  isOwner,
+  hosted,
+  session,
+  onRejoin,
+}: {
+  room: RoomProps;
+  isOwner: boolean;
+  hosted: boolean;
+  session: CallSession;
+  onRejoin: () => void;
+}) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const [showList, setShowList] = useState(false);
   const [showStats, setShowStats] = useState(false);
@@ -161,7 +176,9 @@ function Call({ room, isOwner, session, onRejoin }: { room: RoomProps; isOwner: 
   }
 
   const others = state.participants.filter((p) => p.id !== state.selfId);
-  const shares = state.participants.filter((p) => p.tracks.some((t) => t.kind === "screen"));
+  const speakers = state.participants.filter((p) => p.role === "speaker");
+  const shares = speakers.filter((p) => p.tracks.some((t) => t.kind === "screen"));
+  const self = state.participants.find((p) => p.id === state.selfId);
 
   return (
     <div className="flex h-dvh flex-col">
@@ -173,13 +190,13 @@ function Call({ room, isOwner, session, onRejoin }: { room: RoomProps; isOwner: 
           {state.status === "joining" ? (
             <div className="flex h-full items-center justify-center text-slate-400">接続しています…</div>
           ) : shares.length > 0 ? (
-            <Stage state={state} shares={shares} session={session} />
+            <Stage state={state} speakers={speakers} shares={shares} session={session} />
           ) : (
-            <Grid state={state} session={session} />
+            <Grid state={state} speakers={speakers} session={session} />
           )}
         </main>
         <aside className={`${showList ? "flex" : "hidden"} w-72 shrink-0 flex-col border-l border-white/10 bg-slate-900/60 lg:flex`}>
-          <ParticipantList state={state} session={session} />
+          <ParticipantList state={state} session={session} isHost={!!self?.host} />
         </aside>
       </div>
 
@@ -191,6 +208,8 @@ function Call({ room, isOwner, session, onRejoin }: { room: RoomProps; isOwner: 
         showStats={showStats}
         onToggleStats={() => setShowStats((v) => !v)}
         isOwner={isOwner}
+        hosted={hosted}
+        self={self}
         roomId={room.id}
       />
 
@@ -232,12 +251,15 @@ function TopBar({ room, state }: { room: RoomProps; state: CallState }) {
   );
 }
 
-function Grid({ state, session }: { state: CallState; session: CallSession }) {
-  const n = state.participants.length;
-  const cols = n <= 1 ? "grid-cols-1" : n <= 4 ? "grid-cols-2" : n <= 9 ? "grid-cols-2 sm:grid-cols-3" : "grid-cols-3 sm:grid-cols-4 xl:grid-cols-5";
+/** ステージにはスピーカーだけを並べる（リスナーは参加者パネルに人数と名前だけ）。 */
+function Grid({ state, speakers, session }: { state: CallState; speakers: Participant[]; session: CallSession }) {
+  if (speakers.length === 0) {
+    return <div className="flex h-full items-center justify-center text-sm text-slate-500">スピーカーがまだいません</div>;
+  }
+  const cols = speakers.length <= 1 ? "grid-cols-1" : "grid-cols-2";
   return (
     <div className={`grid h-full auto-rows-fr gap-3 ${cols}`}>
-      {state.participants.map((p) => (
+      {speakers.map((p) => (
         <Tile key={p.id} p={p} self={p.id === state.selfId} session={session} />
       ))}
     </div>
@@ -260,7 +282,7 @@ function Tile({ p, self, session, compact }: { p: Participant; self: boolean; se
   );
 }
 
-function Stage({ state, shares, session }: { state: CallState; shares: Participant[]; session: CallSession }) {
+function Stage({ state, speakers, shares, session }: { state: CallState; speakers: Participant[]; shares: Participant[]; session: CallSession }) {
   const focused = focusedShare(state.participants, state.selectedShare);
   const current = shares.find((p) => p.id === focused) ?? shares[0];
   const stream = state.media[current.id]?.screen;
@@ -287,7 +309,7 @@ function Stage({ state, shares, session }: { state: CallState; shares: Participa
               {p.name}
             </button>
           ))}
-        {state.participants.map((p) => (
+        {speakers.map((p) => (
           <Tile key={p.id} p={p} self={p.id === state.selfId} session={session} compact />
         ))}
       </div>
@@ -359,44 +381,117 @@ function bindStream(stream: MediaStream) {
   };
 }
 
-function ParticipantList({ state, session }: { state: CallState; session: CallSession }) {
+function ParticipantList({ state, session, isHost }: { state: CallState; session: CallSession; isHost: boolean }) {
+  const speakers = state.participants.filter((p) => p.role === "speaker");
+  const raised = state.participants.filter((p) => p.role === "listener" && p.handRaised);
+  const listeners = state.participants.filter((p) => p.role === "listener" && !p.handRaised);
+  const full = speakers.length >= MAX_SPEAKERS;
+
   return (
     <>
       <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-medium">
         <UsersIcon className="size-4" /> 参加者 {state.participants.length}
       </h2>
-      <ul className="flex-1 overflow-y-auto p-2">
-        {state.participants.map((p) => {
-          const self = p.id === state.selfId;
-          const volume = state.volumes[p.id] ?? 1;
-          return (
-            <li key={p.id} className="rounded-lg px-2 py-2 hover:bg-white/[0.03]">
-              <div className="flex items-center gap-2.5">
-                <Avatar p={p} session={session} className="size-8 shrink-0 text-sm" />
-                <span className="min-w-0 flex-1 truncate text-sm">{displayName(p, self)}</span>
-                {p.tracks.some((t) => t.kind === "screen") && <ScreenIcon className="size-4 text-sky-400" />}
-                {p.muted ? <MicOffIcon className="size-4 text-rose-400" /> : <MicIcon className="size-4 text-slate-500" />}
-              </div>
-              {!self && (
-                <label className="mt-1.5 flex items-center gap-2 pl-10 text-xs text-slate-500">
-                  <VolumeIcon className="size-3.5 shrink-0" />
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={Math.round(volume * 100)}
-                    onChange={(e) => session.setVolume(p.id, Number(e.target.value) / 100)}
-                    aria-label={`${p.name} の音量`}
-                    className="volume min-w-0 flex-1"
-                  />
-                  <span className="w-8 text-right tabular-nums">{Math.round(volume * 100)}</span>
-                </label>
+      <div className="flex-1 overflow-y-auto p-2">
+        <Section title={`スピーカー ${speakers.length} / ${MAX_SPEAKERS}`}>
+          {speakers.map((p) => {
+            const self = p.id === state.selfId;
+            const volume = state.volumes[p.id] ?? 1;
+            return (
+              <li key={p.id} className="rounded-lg px-2 py-2 hover:bg-white/[0.03]">
+                <div className="flex items-center gap-2.5">
+                  <Avatar p={p} session={session} className="size-8 shrink-0 text-sm" />
+                  <span className="min-w-0 flex-1 truncate text-sm">
+                    {displayName(p, self)}
+                    {p.host && <span className="ml-1.5 rounded bg-violet-500/20 px-1.5 py-0.5 text-[10px] text-violet-300">ホスト</span>}
+                  </span>
+                  {p.tracks.some((t) => t.kind === "screen") && <ScreenIcon className="size-4 text-sky-400" />}
+                  {p.muted ? <MicOffIcon className="size-4 text-rose-400" /> : <MicIcon className="size-4 text-slate-500" />}
+                  {isHost && !p.host && <RowAction onClick={() => session.demote(p.id)}>リスナーに戻す</RowAction>}
+                </div>
+                {!self && (
+                  <label className="mt-1.5 flex items-center gap-2 pl-10 text-xs text-slate-500">
+                    <VolumeIcon className="size-3.5 shrink-0" />
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={Math.round(volume * 100)}
+                      onChange={(e) => session.setVolume(p.id, Number(e.target.value) / 100)}
+                      aria-label={`${p.name} の音量`}
+                      className="volume min-w-0 flex-1"
+                    />
+                    <span className="w-8 text-right tabular-nums">{Math.round(volume * 100)}</span>
+                  </label>
+                )}
+              </li>
+            );
+          })}
+        </Section>
+
+        {raised.length > 0 && (
+          <Section title={`挙手中 ${raised.length}`}>
+            {raised.map((p) => (
+              <ListenerRow key={p.id} p={p} self={p.id === state.selfId} session={session}>
+                <HandIcon className="size-4 text-amber-400" />
+                {isHost && (
+                  <>
+                    <RowAction onClick={() => session.promote(p.id)} disabled={full} title={full ? "スピーカーが定員です" : undefined}>
+                      許可
+                    </RowAction>
+                    <RowAction onClick={() => session.rejectHand(p.id)}>却下</RowAction>
+                  </>
+                )}
+              </ListenerRow>
+            ))}
+          </Section>
+        )}
+
+        <Section title={`リスナー ${listeners.length} 人`}>
+          {listeners.map((p) => (
+            <ListenerRow key={p.id} p={p} self={p.id === state.selfId} session={session}>
+              {isHost && p.loggedIn && (
+                <RowAction onClick={() => session.promote(p.id)} disabled={full} title={full ? "スピーカーが定員です" : undefined}>
+                  指名
+                </RowAction>
               )}
-            </li>
-          );
-        })}
-      </ul>
+            </ListenerRow>
+          ))}
+        </Section>
+      </div>
     </>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="mb-3">
+      <h3 className="px-2 pb-1 pt-2 text-xs font-medium text-slate-500">{title}</h3>
+      <ul>{children}</ul>
+    </section>
+  );
+}
+
+function ListenerRow({ p, self, session, children }: { p: Participant; self: boolean; session: CallSession; children?: React.ReactNode }) {
+  return (
+    <li className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-white/[0.03]">
+      <Avatar p={p} session={session} className="size-6 shrink-0 text-xs" />
+      <span className="min-w-0 flex-1 truncate text-sm text-slate-300">{displayName(p, self)}</span>
+      {children}
+    </li>
+  );
+}
+
+function RowAction({ children, onClick, disabled, title }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; title?: string }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="shrink-0 rounded-md border border-white/10 px-2 py-0.5 text-xs text-slate-300 hover:bg-white/10 disabled:opacity-40"
+    >
+      {children}
+    </button>
   );
 }
 
@@ -408,6 +503,8 @@ function Controls({
   showStats,
   onToggleStats,
   isOwner,
+  hosted,
+  self,
   roomId,
 }: {
   state: CallState;
@@ -417,6 +514,8 @@ function Controls({
   showStats: boolean;
   onToggleStats: () => void;
   isOwner: boolean;
+  hosted: boolean;
+  self: Participant | undefined;
   roomId: string;
 }) {
   const canShare = typeof navigator !== "undefined" && !!navigator.mediaDevices?.getDisplayMedia;
@@ -427,25 +526,48 @@ function Controls({
 
   return (
     <footer className="flex items-center justify-center gap-3 border-t border-white/10 px-4 py-3">
-      <ControlButton
-        active={!state.muted}
-        danger={state.muted}
-        disabled={!state.micAvailable}
-        onClick={() => session.setMuted(!state.muted)}
-        label={!state.micAvailable ? "マイクなし" : state.muted ? "ミュート解除" : "ミュート"}
-      >
-        {state.muted ? <MicOffIcon /> : <MicIcon />}
-      </ControlButton>
-      {canShare && (
-        <ControlButton
-          active={state.sharing}
-          highlight={state.sharing}
-          onClick={() => (state.sharing ? session.stopScreenShare() : session.startScreenShare())}
-          label={state.sharing ? "共有を停止" : "画面共有"}
-        >
-          <ScreenIcon />
-        </ControlButton>
-      )}
+      {self?.role === "speaker" ? (
+        <>
+          <ControlButton
+            active={!state.muted}
+            danger={state.muted}
+            disabled={!state.micAvailable}
+            onClick={() => session.setMuted(!state.muted)}
+            label={!state.micAvailable ? "マイクなし" : state.muted ? "ミュート解除" : "ミュート"}
+          >
+            {state.muted ? <MicOffIcon /> : <MicIcon />}
+          </ControlButton>
+          {canShare && (
+            <ControlButton
+              active={state.sharing}
+              highlight={state.sharing}
+              onClick={() => (state.sharing ? session.stopScreenShare() : session.startScreenShare())}
+              label={state.sharing ? "共有を停止" : "画面共有"}
+            >
+              <ScreenIcon />
+            </ControlButton>
+          )}
+        </>
+      ) : self && hosted ? (
+        self.loggedIn ? (
+          <ControlButton
+            active={self.handRaised}
+            highlight={self.handRaised}
+            onClick={() => session.raiseHand(!self.handRaised)}
+            label={self.handRaised ? "挙手を取り下げる" : "挙手して話す"}
+          >
+            <HandIcon />
+          </ControlButton>
+        ) : (
+          // ログインするとページを離れるので、通話からは一度抜ける（戻るとログイン済みのリスナーで入り直せる）
+          <a
+            href={`/auth/google?next=${encodeURIComponent(`/r/${roomId}`)}`}
+            className="flex h-11 items-center gap-2 rounded-full bg-white/5 px-4 text-sm text-slate-300 hover:bg-white/10"
+          >
+            <HandIcon /> ログインして挙手
+          </a>
+        )
+      ) : null}
       <ControlButton className="lg:hidden" active={showList} onClick={onToggleList} label="参加者">
         <UsersIcon />
       </ControlButton>

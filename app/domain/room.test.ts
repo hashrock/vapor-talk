@@ -54,6 +54,14 @@ describe("parseCreateTokenInput", () => {
     expect(r.ok && r.value.expiresInSec).toBe(3600);
   });
 
+  it("role は既定でスピーカー、speaker / listener 以外は拒否する", () => {
+    const r = parseCreateTokenInput({}, room, now);
+    expect(r.ok && r.value.role).toBe("speaker");
+    const l = parseCreateTokenInput({ role: "listener" }, room, now);
+    expect(l.ok && l.value.role).toBe("listener");
+    expect(parseCreateTokenInput({ role: "host" }, room, now).ok).toBe(false);
+  });
+
   it("名前は正規化される", () => {
     const r = parseCreateTokenInput({ name: "  Alice\n" }, room, now);
     expect(r.ok && r.value.name).toBe("Alice");

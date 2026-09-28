@@ -9,6 +9,9 @@ export interface PublishedTrack {
   kind: TrackKind;
 }
 
+/** スピーカーはマイク・画面を送れる。リスナーは受け取るだけで、SFU に何も push できない。 */
+export type Role = "speaker" | "listener";
+
 export interface Participant {
   id: string;
   name: string;
@@ -16,6 +19,13 @@ export interface Participant {
   tracks: PublishedTrack[];
   muted: boolean;
   joinedAt: number;
+  role: Role;
+  /** ルームの作成者。スピーカーの許可・降格・指名ができる（常にスピーカー） */
+  host: boolean;
+  /** ログイン済み。ホストがスピーカーにできるのはログイン済みの参加者だけ */
+  loggedIn: boolean;
+  /** 挙手中（ログイン済みのリスナーだけ） */
+  handRaised: boolean;
 }
 
 export type ServerMessage =
@@ -32,6 +42,14 @@ export type ServerMessage =
 
 export type ClientMessage =
   | { type: "update"; tracks?: PublishedTrack[]; muted?: boolean }
+  /** 自分の挙手 / 取り下げ */
+  | { type: "hand"; raised: boolean }
+  /** ホスト: リスナーをスピーカーにする（挙手の許可・直接指名） */
+  | { type: "promote"; id: string }
+  /** ホスト: スピーカーをリスナーに戻す */
+  | { type: "demote"; id: string }
+  /** ホスト: 挙手を却下する */
+  | { type: "reject"; id: string }
   | { type: "ping" };
 
 /** 退出理由（bye と close の code）。4000 番台はアプリ定義で、クライアントは再接続しない。 */
@@ -57,6 +75,10 @@ export function parseClientMessage(raw: string): ClientMessage | null {
   if (!isRecord(m)) return null;
   const o = m;
   if (o.type === "ping") return { type: "ping" };
+  if (o.type === "hand") return typeof o.raised === "boolean" ? { type: "hand", raised: o.raised } : null;
+  if (o.type === "promote" || o.type === "demote" || o.type === "reject") {
+    return typeof o.id === "string" && o.id.length > 0 && o.id.length <= 64 ? { type: o.type, id: o.id } : null;
+  }
   if (o.type !== "update") return null;
 
   const out: { type: "update"; tracks?: PublishedTrack[]; muted?: boolean } = { type: "update" };

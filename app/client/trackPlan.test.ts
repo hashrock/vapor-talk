@@ -8,6 +8,10 @@ const p = (id: string, sessionId: string, names: string[]): Participant => ({
   sessionId,
   muted: false,
   joinedAt: 0,
+  role: "speaker",
+  host: false,
+  loggedIn: false,
+  handRaised: false,
   tracks: names.map((trackName) => ({ trackName, kind: trackName === "mic" ? "mic" : "screen" })),
 });
 
