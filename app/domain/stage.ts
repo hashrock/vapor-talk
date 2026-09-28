@@ -24,6 +24,20 @@ export function speakerCount(participants: Iterable<Participant>): number {
   return n;
 }
 
+export function listenerCount(participants: Iterable<Participant>): number {
+  let n = 0;
+  for (const p of participants) if (p.role === "listener") n++;
+  return n;
+}
+
+/**
+ * viewer に個別の情報を配る参加者か。ホストは全員（挙手の許可・指名に使う）、
+ * それ以外はスピーカーと自分だけ。リスナーの出入りは人数だけをまとめて配る。
+ */
+export function visibleTo(viewer: Participant, p: Participant): boolean {
+  return viewer.host || p.role === "speaker" || p.id === viewer.id;
+}
+
 export interface Entry {
   host: boolean;
   /** 参加トークンで指定されたロール（トークンなしは null） */

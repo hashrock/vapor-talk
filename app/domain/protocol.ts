@@ -29,10 +29,14 @@ export interface Participant {
 }
 
 export type ServerMessage =
-  | { type: "welcome"; participants: Participant[]; expiresAt: string }
+  /** participants は自分に見える参加者だけ（visibleTo）。listeners はリスナーの総数 */
+  | { type: "welcome"; participants: Participant[]; listeners: number; expiresAt: string }
   | { type: "joined"; participant: Participant }
   | { type: "updated"; participant: Participant }
+  /** 退出、または自分から見えなくなった（スピーカーがリスナーに戻った） */
   | { type: "left"; id: string }
+  /** リスナーの総数。出入りのたびではなく数秒ごとにまとめて配る */
+  | { type: "listeners"; count: number }
   | { type: "pong" }
   /**
    * サーバーから退出させるときの正式な通知（code は CloseCode）。直後に同じ code で close するが、

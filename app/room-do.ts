@@ -1,6 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
 import { CloseCode, parseClientMessage, type Participant, type Role, type ServerMessage } from "./domain/protocol";
-import { MAX_SPEAKERS, applyRoleCommand, applyUpdate, initialRole, speakerCount, type StageRules } from "./domain/stage";
+import {
+  MAX_SPEAKERS,
+  applyRoleCommand,
+  applyUpdate,
+  initialRole,
+  listenerCount,
+  speakerCount,
+  visibleTo,
+  type StageRules,
+} from "./domain/stage";
 import type { Bindings } from "./global";
 
 /** ルーム作成時に init で保存する設定。無い（未作成・削除済み・期限切れ）なら接続を断る。 */
@@ -11,7 +20,7 @@ export interface RoomConfig {
   hosted?: boolean;
 }
 
-/** Worker が WebSocket 接続を渡すときに付ける参加者情報（チケット検証済み）。JSON。 */
+/** Worker が WebSocket 接続を渡すときに付ける参加者情報（チケット検証済み）。URL エンコードした JSON。 */
 export const PARTICIPANT_HEADER = "X-Participant";
 export interface ConnectingParticipant {
   id: string;
@@ -29,9 +38,13 @@ interface Member extends Participant {
 
 /** ホストがスピーカーにしたユーザー（userId）。入り直してもスピーカーに戻す */
 const GRANTS_KEY = "grants";
+/** リスナーの人数をまとめて配る間隔。出入りのたびに全員へ配ると 100 人で 1 万通になる */
+const LISTENER_COUNT_INTERVAL_MS = 3000;
 
 /**
  * 1ルーム = 1インスタンス。参加者の在室状態と公開トラックを WebSocket で配る。
+ * 個別に配るのは見える参加者（visibleTo: スピーカーと自分、ホストには全員）の変化だけで、
+ * リスナーの出入りは人数を数秒ごとにまとめて配る。
  * 音声・映像そのものは SFU を通るのでここは通らない。
  * Hibernation API を使い、参加者の状態は各 WebSocket の attachment に持つ。
  */
@@ -39,6 +52,9 @@ export class RoomDO extends DurableObject<Bindings> {
   /** undefined = まだ storage から読んでいない */
   private config: RoomConfig | null | undefined;
   private grants: Set<string> | undefined;
+  private countTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 最後に配ったリスナー数（-1 = まだ配っていない。休止から起きたら配り直す） */
+  private sentListenerCount = -1;
 
   constructor(ctx: DurableObjectState, env: Bindings) {
     super(ctx, env);
@@ -52,7 +68,7 @@ export class RoomDO extends DurableObject<Bindings> {
     }
     const config = await this.loadConfig();
     if (!config || Date.parse(config.expiresAt) <= Date.now()) return new Response("Gone", { status: 410 });
-    const joining = JSON.parse(request.headers.get(PARTICIPANT_HEADER) ?? "null") as ConnectingParticipant | null;
+    const joining = JSON.parse(decodeURIComponent(request.headers.get(PARTICIPANT_HEADER) ?? "null")) as ConnectingParticipant | null;
     if (!joining) return new Response("Bad request", { status: 400 });
 
     const pair = new WebSocketPair();
@@ -102,8 +118,14 @@ export class RoomDO extends DurableObject<Bindings> {
       joinedAt: replaced?.joinedAt ?? Date.now(),
     };
     server.serializeAttachment(member);
-    this.send(server, { type: "welcome", participants: [...others, member].map(toPublic), expiresAt: config.expiresAt });
-    this.broadcast({ type: "joined", participant: toPublic(member) }, server);
+    const everyone = [...others, member];
+    this.send(server, {
+      type: "welcome",
+      participants: everyone.filter((p) => visibleTo(member, p)).map(toPublic),
+      listeners: listenerCount(everyone),
+      expiresAt: config.expiresAt,
+    });
+    this.announce(replaced, member, server);
 
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -114,7 +136,7 @@ export class RoomDO extends DurableObject<Bindings> {
     const p = this.memberOf(ws);
     if (!msg || msg.type === "ping" || !p) return;
     if (msg.type === "update") {
-      this.save(ws, { ...p, ...applyUpdate(p, msg) });
+      this.save(ws, p, applyUpdate(p, msg));
       return;
     }
 
@@ -131,7 +153,7 @@ export class RoomDO extends DurableObject<Bindings> {
     for (const changed of applyRoleCommand(p, msg, members, this.rules(config))) {
       const before = members.find((m) => m.id === changed.id)!;
       if (before.role !== changed.role && before.userId) await this.setGrant(before.userId, changed.role === "speaker");
-      this.save(sockets.get(changed.id)!, { ...before, ...changed });
+      this.save(sockets.get(changed.id)!, before, changed);
     }
   }
 
@@ -193,9 +215,36 @@ export class RoomDO extends DurableObject<Bindings> {
       .filter((m) => m !== null);
   }
 
-  private save(ws: WebSocket, m: Member) {
-    ws.serializeAttachment(m);
-    this.broadcast({ type: "updated", participant: toPublic(m) });
+  private save(ws: WebSocket, before: Member, changed: Participant) {
+    const after: Member = { ...before, ...changed };
+    ws.serializeAttachment(after);
+    this.announce(before, after);
+  }
+
+  /**
+   * 参加者 1 人の変化（入室: before=null、退出: after=null）を、見える人にだけ配る。
+   * 見えるようになった人には joined、見えなくなった人には left。リスナー数が変わったらまとめて配る。
+   */
+  private announce(before: Member | null, after: Member | null, except?: WebSocket) {
+    for (const ws of this.ctx.getWebSockets()) {
+      const viewer = ws === except ? null : this.memberOf(ws);
+      if (!viewer) continue;
+      const was = !!before && visibleTo(viewer, before);
+      const now = !!after && visibleTo(viewer, after);
+      if (now) this.send(ws, { type: was ? "updated" : "joined", participant: toPublic(after!) });
+      else if (was) this.send(ws, { type: "left", id: before!.id });
+    }
+    if ((before?.role === "listener") !== (after?.role === "listener")) this.scheduleListenerCount();
+  }
+
+  private scheduleListenerCount() {
+    this.countTimer ??= setTimeout(() => {
+      this.countTimer = null;
+      const count = listenerCount(this.members());
+      if (count === this.sentListenerCount) return;
+      this.sentListenerCount = count;
+      this.broadcast({ type: "listeners", count });
+    }, LISTENER_COUNT_INTERVAL_MS);
   }
 
   private async loadConfig(): Promise<RoomConfig | null> {
@@ -210,6 +259,8 @@ export class RoomDO extends DurableObject<Bindings> {
     }
     this.config = null;
     this.grants = undefined;
+    if (this.countTimer) clearTimeout(this.countTimer);
+    this.countTimer = null;
     await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
   }
@@ -218,7 +269,7 @@ export class RoomDO extends DurableObject<Bindings> {
     const p = this.memberOf(ws);
     if (!p) return;
     ws.serializeAttachment(null);
-    this.broadcast({ type: "left", id: p.id });
+    this.announce(p, null);
   }
 
   private memberOf(ws: WebSocket): Member | null {

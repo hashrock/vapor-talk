@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_EXPIRES_IN_SEC,
-  MAX_PARTICIPANTS_LIMIT,
+  DEFAULT_MAX_PARTICIPANTS,
   isExpired,
   normalizeDisplayName,
   parseCreateRoomInput,
@@ -14,13 +14,13 @@ describe("parseCreateRoomInput", () => {
     const r = parseCreateRoomInput({});
     expect(r).toEqual({
       ok: true,
-      value: { name: "ボイスチャット", expiresInSec: DEFAULT_EXPIRES_IN_SEC, maxParticipants: MAX_PARTICIPANTS_LIMIT, guestAccess: true, externalId: null },
+      value: { name: "ボイスチャット", expiresInSec: DEFAULT_EXPIRES_IN_SEC, maxParticipants: DEFAULT_MAX_PARTICIPANTS, guestAccess: true, externalId: null },
     });
   });
 
-  it("参加上限は 20 人まで", () => {
-    expect(parseCreateRoomInput({ maxParticipants: 21 }).ok).toBe(false);
-    expect(parseCreateRoomInput({ maxParticipants: 20 }).ok).toBe(true);
+  it("参加上限は 200 人まで", () => {
+    expect(parseCreateRoomInput({ maxParticipants: 201 }).ok).toBe(false);
+    expect(parseCreateRoomInput({ maxParticipants: 200 }).ok).toBe(true);
   });
 
   it("有効期限は 5 分〜7 日の整数秒", () => {

@@ -253,7 +253,8 @@ app.get("/api/rooms/:id/ws", async (c) => {
     invitedRole: claims.invitedRole ?? null,
   };
   const headers = new Headers(c.req.raw.headers);
-  headers.set(PARTICIPANT_HEADER, JSON.stringify(joining));
+  // ヘッダーは ASCII のみなので、日本語の表示名が入る JSON は URL エンコードして渡す
+  headers.set(PARTICIPANT_HEADER, encodeURIComponent(JSON.stringify(joining)));
   return roomStub(c, roomId).fetch(new Request(c.req.raw.url, { headers }));
 });
 

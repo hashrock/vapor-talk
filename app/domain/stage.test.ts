@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Participant } from "./protocol";
-import { applyRoleCommand, applyUpdate, initialRole, type StageRules } from "./stage";
+import { applyRoleCommand, applyUpdate, initialRole, listenerCount, visibleTo, type StageRules } from "./stage";
 
 const rules: StageRules = { hosted: true, maxSpeakers: 2 };
 
@@ -108,5 +108,26 @@ describe("applyRoleCommand", () => {
     const a = p("a", { handRaised: true });
     expect(applyRoleCommand(host, { type: "reject", id: "a" }, [host, a], rules)).toEqual([{ ...a, handRaised: false }]);
     expect(applyRoleCommand(host, { type: "reject", id: "a" }, [host, { ...a, handRaised: false }], rules)).toEqual([]);
+  });
+});
+
+describe("visibleTo", () => {
+  const speaker = p("s", { role: "speaker" });
+  const a = p("a");
+  const b = p("b");
+
+  it("ホストには全員が見える", () => {
+    expect([speaker, a, b].every((x) => visibleTo(host, x))).toBe(true);
+  });
+
+  it("ホスト以外に見えるのはスピーカーと自分だけ", () => {
+    expect(visibleTo(a, speaker)).toBe(true);
+    expect(visibleTo(a, a)).toBe(true);
+    expect(visibleTo(a, b)).toBe(false);
+    expect(visibleTo(speaker, a)).toBe(false);
+  });
+
+  it("リスナーの数を数える", () => {
+    expect(listenerCount([host, speaker, a, b])).toBe(2);
   });
 });

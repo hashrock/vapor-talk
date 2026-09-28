@@ -234,7 +234,7 @@ function TopBar({ room, state }: { room: RoomProps; state: CallState }) {
       <div className="min-w-0 flex-1">
         <h1 className="truncate font-semibold">{room.name}</h1>
         <p className="text-xs text-slate-500">
-          {state.participants.length} / {room.maxParticipants} 人・残り {formatRemaining(remaining)}
+          {totalCount(state)} / {room.maxParticipants} 人・残り {formatRemaining(remaining)}
           {state.status === "reconnecting" && <span className="ml-2 text-amber-400">再接続中…</span>}
         </p>
       </div>
@@ -384,13 +384,14 @@ function bindStream(stream: MediaStream) {
 function ParticipantList({ state, session, isHost }: { state: CallState; session: CallSession; isHost: boolean }) {
   const speakers = state.participants.filter((p) => p.role === "speaker");
   const raised = state.participants.filter((p) => p.role === "listener" && p.handRaised);
+  // ホスト以外に見えるリスナーは自分だけ（ほかは人数だけが届く）
   const listeners = state.participants.filter((p) => p.role === "listener" && !p.handRaised);
   const full = speakers.length >= MAX_SPEAKERS;
 
   return (
     <>
       <h2 className="flex items-center gap-2 border-b border-white/10 px-4 py-3 text-sm font-medium">
-        <UsersIcon className="size-4" /> 参加者 {state.participants.length}
+        <UsersIcon className="size-4" /> 参加者 {totalCount(state)}
       </h2>
       <div className="flex-1 overflow-y-auto p-2">
         <Section title={`スピーカー ${speakers.length} / ${MAX_SPEAKERS}`}>
@@ -447,7 +448,10 @@ function ParticipantList({ state, session, isHost }: { state: CallState; session
           </Section>
         )}
 
-        <Section title={`リスナー ${listeners.length} 人`}>
+        <Section
+          title={`リスナー ${state.listenerCount} 人`}
+          collapsible={listeners.length > LISTENER_LIST_OPEN_MAX}
+        >
           {listeners.map((p) => (
             <ListenerRow key={p.id} p={p} self={p.id === state.selfId} session={session}>
               {isHost && p.loggedIn && (
@@ -463,10 +467,22 @@ function ParticipantList({ state, session, isHost }: { state: CallState; session
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/** ホストに見せるリスナー一覧は、これより多いと折りたたんでおく */
+const LISTENER_LIST_OPEN_MAX = 20;
+
+function Section({ title, collapsible, children }: { title: string; collapsible?: boolean; children: React.ReactNode }) {
+  const heading = "px-2 pb-1 pt-2 text-xs font-medium text-slate-500";
+  if (collapsible) {
+    return (
+      <details className="mb-3">
+        <summary className={`${heading} cursor-pointer hover:text-slate-300`}>{title}</summary>
+        <ul>{children}</ul>
+      </details>
+    );
+  }
   return (
     <section className="mb-3">
-      <h3 className="px-2 pb-1 pt-2 text-xs font-medium text-slate-500">{title}</h3>
+      <h3 className={heading}>{title}</h3>
       <ul>{children}</ul>
     </section>
   );
@@ -652,6 +668,11 @@ function Avatar({ p, session, className }: { p: Participant; session: CallSessio
       {initial(p.name)}
     </span>
   );
+}
+
+/** 在室人数。リスナーは一覧ではなく人数で届くので、スピーカー + リスナー数で数える */
+function totalCount(state: CallState): number {
+  return state.participants.filter((p) => p.role === "speaker").length + state.listenerCount;
 }
 
 function displayName(p: Participant, self: boolean): string {
