@@ -4,12 +4,13 @@
   "main": "./app/server.ts",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
+  // カスタムドメインではなくルート（プロキシ済み DNS レコード talk.hashrock.info が必要）
+  "routes": [{ "pattern": "talk.hashrock.info/*", "zone_name": "hashrock.info" }],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "vapor-talk-db",
-      // `wrangler d1 create vapor-talk-db` で作成した ID に置き換える
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "cb11fd1e-e188-493c-939f-624cfa1c847f"
     }
   ],
   "durable_objects": {
@@ -20,6 +21,6 @@
   "triggers": { "crons": ["*/30 * * * *"] },
   "vars": {
     // Cloudflare Realtime SFU の App ID（トークンは secret の CALLS_APP_TOKEN）
-    "CALLS_APP_ID": ""
+    "CALLS_APP_ID": "18905d714068b027a6e9460e7cfd5960"
   }
 }
