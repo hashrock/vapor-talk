@@ -7,7 +7,8 @@ import {
   type ServerMessage,
   type TrackKind,
 } from "../domain/protocol";
-import { desiredRemoteTracks, planTrackSync, type RemoteTrackRef } from "./trackPlan";
+import { bandwidth, sampleStats, type BandwidthStats, type StatsSample } from "./stats";
+import { desiredRemoteTracks, focusedShare, planTrackSync, type RemoteTrackRef } from "./trackPlan";
 
 /**
  * 1回の通話。ルームの WebSocket（在室・公開トラックの共有）と、
@@ -39,6 +40,8 @@ export interface CallState {
   micAvailable: boolean;
   muted: boolean;
   sharing: boolean;
+  /** ステージで見たい共有者（null なら最初の共有者）。実際に出す人は focusedShare() で決める */
+  selectedShare: string | null;
   expiresAt: string | null;
 }
 
@@ -67,6 +70,13 @@ interface PulledTrack extends RemoteTrackRef {
   mid: string;
 }
 
+interface PushTrack {
+  track: MediaStreamTrack;
+  trackName: string;
+  kind: TrackKind;
+  encodings?: RTCRtpEncodingParameters[];
+}
+
 interface LocalTrack {
   trackName: string;
   kind: TrackKind;
@@ -79,6 +89,35 @@ const SPEAKING_THRESHOLD = 0.03;
 const MAX_RECONNECTS = 6;
 /** 相手の push 直後などで pull に失敗したときに取り直す回数（成功したら戻す） */
 const PULL_RETRIES = 5;
+/**
+ * 画面共有の送信ビットレート上限。既定（720p 以上で約 2.5 Mbps）のままだと、
+ * スクロールや動画で全員分の帯域が跳ね上がる。contentHint="detail" なので、
+ * 足りないときは解像度ではなくフレームレートが落ちる（文字は読めるまま）。
+ */
+const SCREEN_MAX_BITRATE = 1_000_000;
+const STATS_INTERVAL_MS = 2000;
+
+/** 値 1 つを購読できる小さなストア。購読者がいる間だけ動かしたいもの（統計）は onActive で開始・停止する。 */
+class Channel<T> {
+  private listeners = new Set<() => void>();
+  constructor(
+    private value: T,
+    private readonly onActive?: (active: boolean) => void,
+  ) {}
+  subscribe = (fn: () => void) => {
+    this.listeners.add(fn);
+    if (this.listeners.size === 1) this.onActive?.(true);
+    return () => {
+      this.listeners.delete(fn);
+      if (this.listeners.size === 0) this.onActive?.(false);
+    };
+  };
+  get = () => this.value;
+  set(value: T) {
+    this.value = value;
+    for (const fn of this.listeners) fn();
+  }
+}
 
 export class CallSession {
   private state: CallState = {
@@ -92,6 +131,7 @@ export class CallSession {
     micAvailable: false,
     muted: false,
     sharing: false,
+    selectedShare: null,
     expiresAt: null,
   };
   private listeners = new Set<() => void>();
@@ -116,8 +156,12 @@ export class CallSession {
   private analysers = new Map<string, { analyser: AnalyserNode; source: MediaStreamAudioSourceNode }>();
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   private levelBuf = new Float32Array(512);
-  private speaking: Speaking = new Set();
-  private speakingListeners = new Set<() => void>();
+  /** 発話中の participantId。頻繁に変わるので CallState とは別に購読する */
+  readonly speaking = new Channel<Speaking>(new Set());
+  /** 帯域の統計。購読されている間（統計パネルを開いている間）だけ getStats() する */
+  readonly stats = new Channel<BandwidthStats | null>(null, (active) => this.pollStats(active));
+  private statsTimer: ReturnType<typeof setInterval> | null = null;
+  private lastSample: StatsSample | null = null;
 
   constructor(
     private readonly roomId: string,
@@ -133,13 +177,6 @@ export class CallSession {
   };
 
   getSnapshot = () => this.state;
-
-  subscribeSpeaking = (fn: () => void) => {
-    this.speakingListeners.add(fn);
-    return () => this.speakingListeners.delete(fn);
-  };
-
-  getSpeaking = () => this.speaking;
 
   private set(patch: Partial<CallState>) {
     this.state = { ...this.state, ...patch };
@@ -204,6 +241,7 @@ export class CallSession {
     if (this.state.status === "ended") return;
     if (this.pingTimer) clearInterval(this.pingTimer);
     if (this.levelTimer) clearInterval(this.levelTimer);
+    this.pollStats(false);
     if (this.ws) {
       this.ws.onclose = null;
       this.ws.close(1000, "leave");
@@ -229,6 +267,12 @@ export class CallSession {
     this.set({ volumes: { ...this.state.volumes, [participantId]: Math.min(1, Math.max(0, volume)) } });
   }
 
+  /** ステージに出す画面を選ぶ。見ていない画面は pull しないので、切り替えると取り直す */
+  selectShare(participantId: string) {
+    this.set({ selectedShare: participantId });
+    this.scheduleSync();
+  }
+
   async startScreenShare(): Promise<void> {
     if (this.state.sharing || !this.join) return;
     let stream: MediaStream;
@@ -242,8 +286,8 @@ export class CallSession {
     if (!video) return;
     video.contentHint = "detail";
     video.addEventListener("ended", () => void this.stopScreenShare());
-    const tracks: { track: MediaStreamTrack; trackName: string; kind: TrackKind }[] = [
-      { track: video, trackName: `screen-${seq}`, kind: "screen" },
+    const tracks: PushTrack[] = [
+      { track: video, trackName: `screen-${seq}`, kind: "screen", encodings: [{ maxBitrate: SCREEN_MAX_BITRATE }] },
     ];
     const audio = stream.getAudioTracks()[0];
     if (audio) tracks.push({ track: audio, trackName: `screen-audio-${seq}`, kind: "screen-audio" });
@@ -369,16 +413,16 @@ export class CallSession {
     return json;
   }
 
-  private async pushTracks(tracks: { track: MediaStreamTrack; trackName: string; kind: TrackKind }[]) {
+  private async pushTracks(tracks: PushTrack[]) {
     const pc = this.pc!;
-    const transceivers = tracks.map((t) => pc.addTransceiver(t.track, { direction: "sendonly" }));
+    const transceivers = tracks.map((t) => pc.addTransceiver(t.track, { direction: "sendonly", sendEncodings: t.encodings }));
     await pc.setLocalDescription(await pc.createOffer());
     const res = await this.sfu("POST", "tracks/new", {
       sessionDescription: { type: "offer", sdp: pc.localDescription!.sdp },
       tracks: transceivers.map((tr, i) => ({ location: "local", mid: tr.mid, trackName: tracks[i].trackName })),
     });
     await pc.setRemoteDescription(res.sessionDescription!);
-    tracks.forEach((t, i) => this.local.push({ ...t, transceiver: transceivers[i] }));
+    tracks.forEach((t, i) => this.local.push({ trackName: t.trackName, kind: t.kind, track: t.track, transceiver: transceivers[i] }));
   }
 
   private scheduleSync() {
@@ -393,7 +437,11 @@ export class CallSession {
   /** 在室者の公開トラックと、自分が pull しているトラックを一致させる。 */
   private async syncRemote() {
     if (!this.pc || this.state.status === "ended" || !this.join) return;
-    const plan = planTrackSync(this.pulled, desiredRemoteTracks(this.state.participants, this.join.participantId));
+    const { participants, selectedShare } = this.state;
+    const plan = planTrackSync(
+      this.pulled,
+      desiredRemoteTracks(participants, this.join.participantId, focusedShare(participants, selectedShare)),
+    );
 
     if (plan.close.length) {
       const transceivers: RTCRtpTransceiver[] = [];
@@ -425,6 +473,12 @@ export class CallSession {
       }
       if (res.requiresImmediateRenegotiation && res.sessionDescription) {
         await this.pc.setRemoteDescription(res.sessionDescription);
+        // SFU は閉じたトラックの m-line（mid）を使い回すことがある。閉じるときに inactive にした
+        // transceiver のままだと answer も inactive になって届かないので、受信に戻す
+        const mids = new Set((res.tracks ?? []).map((t) => t.mid));
+        for (const tr of this.pc.getTransceivers()) {
+          if (tr.mid && mids.has(tr.mid) && tr.direction === "inactive") tr.direction = "recvonly";
+        }
         await this.pc.setLocalDescription(await this.pc.createAnswer());
         await this.sfu("PUT", "renegotiate", {
           sessionDescription: { type: "answer", sdp: this.pc.localDescription!.sdp },
@@ -499,9 +553,26 @@ export class CallSession {
       for (const v of buf) sum += v * v;
       if (Math.sqrt(sum / buf.length) > SPEAKING_THRESHOLD) next.add(id);
     }
-    if (next.size === this.speaking.size && [...next].every((id) => this.speaking.has(id))) return;
-    this.speaking = next;
-    for (const fn of this.speakingListeners) fn();
+    const prev = this.speaking.get();
+    if (next.size === prev.size && [...next].every((id) => prev.has(id))) return;
+    this.speaking.set(next);
+  }
+
+  // --- 帯域の統計 ---
+
+  private pollStats(active: boolean) {
+    if (this.statsTimer) clearInterval(this.statsTimer);
+    this.statsTimer = null;
+    this.lastSample = null;
+    if (!active || this.state.status === "ended") return;
+    const tick = async () => {
+      if (!this.pc) return;
+      const sample = sampleStats((await this.pc.getStats()).values() as Iterable<Record<string, unknown>>, performance.now());
+      if (this.lastSample) this.stats.set(bandwidth(this.lastSample, sample));
+      this.lastSample = sample;
+    };
+    void tick();
+    this.statsTimer = setInterval(() => void tick(), STATS_INTERVAL_MS);
   }
 }
 

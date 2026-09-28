@@ -13,12 +13,25 @@ export function remoteKey(participantId: string, trackName: string): string {
   return `${participantId}/${trackName}`;
 }
 
-/** 在室者の公開トラックのうち、自分以外のものを全部 pull したい。 */
-export function desiredRemoteTracks(participants: Iterable<Participant>, selfId: string): RemoteTrackRef[] {
+/**
+ * 画面共有中の人のうち、ステージに出す 1 人。選んだ人がまだ共有していればその人、
+ * そうでなければ最初に見つかった共有者（自分を含む）。誰も共有していなければ null。
+ */
+export function focusedShare(participants: readonly Participant[], selected: string | null): string | null {
+  const sharers = participants.filter((p) => p.tracks.some((t) => t.kind === "screen")).map((p) => p.id);
+  return selected && sharers.includes(selected) ? selected : (sharers[0] ?? null);
+}
+
+/**
+ * 自分以外の公開トラックのうち pull したいもの。音声は全員分、
+ * 画面（映像と音声）はステージに出している 1 人分だけ（見ていない画面で帯域を使わない）。
+ */
+export function desiredRemoteTracks(participants: Iterable<Participant>, selfId: string, focused: string | null): RemoteTrackRef[] {
   const out: RemoteTrackRef[] = [];
   for (const p of participants) {
     if (p.id === selfId) continue;
     for (const t of p.tracks) {
+      if (t.kind !== "mic" && p.id !== focused) continue;
       out.push({ key: remoteKey(p.id, t.trackName), participantId: p.id, sessionId: p.sessionId, trackName: t.trackName, kind: t.kind });
     }
   }
