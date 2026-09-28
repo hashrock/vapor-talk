@@ -60,3 +60,9 @@ export const TrashIcon = ({ className }: P) => (
     <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14" />
   </svg>
 );
+
+export const ChartIcon = ({ className }: P) => (
+  <svg {...base(className)}>
+    <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
+  </svg>
+);

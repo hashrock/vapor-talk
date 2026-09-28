@@ -2,9 +2,11 @@ import { Head, Link } from "@inertiajs/react";
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { CallSession, type CallState, type EndReason } from "../../client/callSession";
 import type { Participant } from "../../domain/protocol";
+import { focusedShare } from "../../client/trackPlan";
+import type { BandwidthStats } from "../../client/stats";
 import { DISPLAY_NAME_MAX } from "../../domain/room";
 import { Logo } from "../../components/Logo";
-import { LinkIcon, MicIcon, MicOffIcon, PhoneOffIcon, ScreenIcon, TrashIcon, UsersIcon, VolumeIcon } from "../../components/icons";
+import { ChartIcon, LinkIcon, MicIcon, MicOffIcon, PhoneOffIcon, ScreenIcon, TrashIcon, UsersIcon, VolumeIcon } from "../../components/icons";
 import { useCopy } from "../../lib/clipboard";
 import { formatRemaining } from "../../lib/format";
 import { forgetManageKey, getManageKey } from "../../lib/manageKeys";
@@ -135,6 +137,7 @@ const END_MESSAGES: Record<EndReason, string> = {
 function Call({ room, session, onRejoin }: { room: RoomProps; session: CallSession; onRejoin: () => void }) {
   const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
   const [showList, setShowList] = useState(false);
+  const [showStats, setShowStats] = useState(false);
   const manageKey = useMemo(() => getManageKey(room.id), [room.id]);
 
   if (state.status === "ended") {
@@ -158,14 +161,15 @@ function Call({ room, session, onRejoin }: { room: RoomProps; session: CallSessi
   }
 
   const others = state.participants.filter((p) => p.id !== state.selfId);
-  const shares = state.participants.filter((p) => state.media[p.id]?.screen);
+  const shares = state.participants.filter((p) => p.tracks.some((t) => t.kind === "screen"));
 
   return (
     <div className="flex h-dvh flex-col">
       <TopBar room={room} state={state} />
 
       <div className="flex min-h-0 flex-1">
-        <main className="min-w-0 flex-1 p-3 md:p-4">
+        <main className="relative min-w-0 flex-1 p-3 md:p-4">
+          {showStats && <StatsPanel session={session} />}
           {state.status === "joining" ? (
             <div className="flex h-full items-center justify-center text-slate-400">接続しています…</div>
           ) : shares.length > 0 ? (
@@ -184,6 +188,8 @@ function Call({ room, session, onRejoin }: { room: RoomProps; session: CallSessi
         session={session}
         showList={showList}
         onToggleList={() => setShowList((v) => !v)}
+        showStats={showStats}
+        onToggleStats={() => setShowStats((v) => !v)}
         manageKey={manageKey}
         roomId={room.id}
       />
@@ -255,14 +261,14 @@ function Tile({ p, self, session, compact }: { p: Participant; self: boolean; se
 }
 
 function Stage({ state, shares, session }: { state: CallState; shares: Participant[]; session: CallSession }) {
-  const [selected, setSelected] = useState<string | null>(null);
-  const current = shares.find((p) => p.id === selected) ?? shares[0];
+  const focused = focusedShare(state.participants, state.selectedShare);
+  const current = shares.find((p) => p.id === focused) ?? shares[0];
   const stream = state.media[current.id]?.screen;
 
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="relative min-h-0 flex-1 overflow-hidden rounded-2xl bg-black">
-        {stream && <Video stream={stream} />}
+        {stream ? <Video stream={stream} /> : <div className="flex h-full items-center justify-center text-sm text-slate-500">画面を読み込んでいます…</div>}
         <span className="absolute left-3 top-3 rounded-md bg-black/60 px-2 py-1 text-xs">
           {displayName(current, current.id === state.selfId)} の画面
         </span>
@@ -272,7 +278,7 @@ function Stage({ state, shares, session }: { state: CallState; shares: Participa
           shares.map((p) => (
             <button
               key={`share-${p.id}`}
-              onClick={() => setSelected(p.id)}
+              onClick={() => session.selectShare(p.id)}
               className={`h-24 shrink-0 rounded-2xl border px-4 text-xs ${
                 p.id === current.id ? "border-violet-500 bg-violet-500/10" : "border-white/10 bg-slate-900"
               }`}
@@ -287,6 +293,39 @@ function Stage({ state, shares, session }: { state: CallState; shares: Participa
       </div>
     </div>
   );
+}
+
+/** 通信状況。開いている間だけ CallSession が getStats() を回す（session.stats を購読している間）。 */
+function StatsPanel({ session }: { session: CallSession }) {
+  const stats = useSyncExternalStore(session.stats.subscribe, session.stats.get, session.stats.get);
+  const rows: [string, (s: BandwidthStats) => string][] = [
+    ["送信（音声 / 画面）", (s) => `${s.audioOut} / ${s.videoOut} kbps`],
+    ["受信（音声 / 画面）", (s) => `${s.audioIn} / ${s.videoIn} kbps`],
+    ["合計 送信 / 受信", (s) => `${s.totalOut} / ${s.totalIn} kbps`],
+    ["遅延（往復）", (s) => (s.rttMs === null ? "—" : `${s.rttMs} ms`)],
+    ["累計 送信 / 受信", (s) => `${formatBytes(s.sentBytes)} / ${formatBytes(s.receivedBytes)}`],
+  ];
+  return (
+    <div className="absolute right-5 top-5 z-10 w-64 rounded-xl border border-white/10 bg-slate-900/95 p-3 text-xs shadow-xl">
+      <h2 className="mb-2 font-medium text-slate-300">通信状況</h2>
+      {stats ? (
+        <dl className="space-y-1">
+          {rows.map(([label, value]) => (
+            <div key={label} className="flex justify-between gap-2">
+              <dt className="text-slate-500">{label}</dt>
+              <dd className="tabular-nums text-slate-200">{value(stats)}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="text-slate-500">計測中…</p>
+      )}
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  return n >= 1e9 ? `${(n / 1e9).toFixed(2)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.round(n / 1e3)} KB`;
 }
 
 function Video({ stream }: { stream: MediaStream }) {
@@ -366,6 +405,8 @@ function Controls({
   session,
   showList,
   onToggleList,
+  showStats,
+  onToggleStats,
   manageKey,
   roomId,
 }: {
@@ -373,6 +414,8 @@ function Controls({
   session: CallSession;
   showList: boolean;
   onToggleList: () => void;
+  showStats: boolean;
+  onToggleStats: () => void;
   manageKey: string | null;
   roomId: string;
 }) {
@@ -408,6 +451,9 @@ function Controls({
       )}
       <ControlButton className="lg:hidden" active={showList} onClick={onToggleList} label="参加者">
         <UsersIcon />
+      </ControlButton>
+      <ControlButton active={showStats} onClick={onToggleStats} label="通信状況">
+        <ChartIcon />
       </ControlButton>
       {manageKey &&
         (confirmDelete ? (
@@ -478,7 +524,7 @@ function ControlButton({
 
 /** 発話中は光る。発話状態だけを購読するので、話すたびに画面全体が再描画されることはない。 */
 function Avatar({ p, session, className }: { p: Participant; session: CallSession; className: string }) {
-  const speaking = useSyncExternalStore(session.subscribeSpeaking, () => session.getSpeaking().has(p.id), () => false);
+  const speaking = useSyncExternalStore(session.speaking.subscribe, () => session.speaking.get().has(p.id), () => false);
   return (
     <span
       className={`flex items-center justify-center rounded-full font-semibold text-white ${className} ${speaking ? "speaking" : ""}`}
