@@ -12,6 +12,8 @@ export interface Room {
   maxParticipants: number;
   guestAccess: boolean;
   externalId: string | null;
+  /** Web でログインユーザーが作ったルームの持ち主。API で作ったルームは null */
+  ownerId: string | null;
   createdAt: string;
   expiresAt: string;
 }

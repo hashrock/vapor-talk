@@ -1,6 +1,7 @@
 import type { RoomDO } from "./room-do";
 import type { StoredRoom } from "./db/rooms";
 import type { SessionClaims } from "./lib/tokens";
+import type { SessionUser } from "./user";
 
 export type Bindings = {
   DB: D1Database;
@@ -12,11 +13,20 @@ export type Bindings = {
   API_KEY?: string;
   /** 参加トークン・セッションチケットの署名鍵（secret） */
   TOKEN_SECRET: string;
+  /** ログインセッション Cookie の署名鍵（secret） */
+  SESSION_SECRET: string;
+  /** Google OAuth（ルーム作成のログイン）。@hono/oauth-providers が env から読む */
+  GOOGLE_ID?: string;
+  GOOGLE_SECRET?: string;
+  /** ローカル開発用。設定すると Google を通さずに Dev User でログインする */
+  DEV_BYPASS_AUTH?: string;
 };
 
 export type Env = {
   Bindings: Bindings;
   Variables: {
+    /** ログイン中のユーザー（sessionMiddleware） */
+    user: SessionUser | null;
     /** 認証ミドルウェアが読み込んだルーム（DELETE /api/v1/rooms/:id） */
     room?: StoredRoom | null;
     /** 検証済みのセッションチケット（SFU 中継） */

@@ -44,6 +44,7 @@ describe("parseCreateTokenInput", () => {
     maxParticipants: 20,
     guestAccess: false,
     externalId: null,
+    ownerId: null,
     createdAt: now.toISOString(),
     expiresAt: "2026-01-01T01:00:00Z",
   };
